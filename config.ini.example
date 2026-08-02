@@ -1390,12 +1390,17 @@ require_path_bytes_failure_response =
 # Optional: full ack template for test/t. When set, overrides [Keywords] test for this command only.
 # Core placeholders: sender, phrase, phrase_part, connection_info, path, hops, hops_label,
 #   timestamp, elapsed, snr, path_distance, firstlast_distance.
+# NOTE: the default test reply is now personalized — the command prepends
+# "Hi <node>, here's your test results:" and splits into multiple messages when
+# needed, so this template is the METRICS body only (no sender/ack prefix).
 # Enhanced link-report placeholders (added by the node-performance report):
-#   rssi (dBm or "—"), signal_icon (cell-style bars ▂▄▆█ from RSSI, empty if unknown),
-#   bot_name, bot_city ("Fairlawn, VA"), reached ("Reached <bot> in <City, ST>"),
-#   sender_city, reach_distance ("~28.4 km"), reach_suffix (" (~28.4 km from your node)"
+#   rssi (dBm or "—"), signal_icon (compact green 📶 from RSSI, empty if unknown),
+#   signal_meter (green level meter 🟩🟩🟩⬜ for the full report), bot_name,
+#   bot_city ("Fairlawn, VA"), reached ("Reached <bot> in <City, ST>"), sender_city,
+#   reach_distance ("~0.7 mi", US miles), reach_suffix (" (~0.7 mi from your node)"
 #   or empty), link_quality (Excellent/Good/Fair/Weak/Marginal), quality_hint (tuning
-#   sentence), link_margin (dB), route_type (direct/flood/routed), airtime ("452ms"),
+#   sentence), link_margin (dB), route_type (direct/flood/routed), hash_bytes
+#   ("2B hash", routed only), hash_suffix (" | 2B hash" or empty), airtime ("452ms"),
 #   path_bytes ("6B path"), path_named ("NODE (City) > NODE (City)"), node_batt (V or
 #   "—"), node_temp (°C or "—"), batt_suffix (" | batt 4.15V" or empty).
 # Pipe filters (feed-style), e.g. only show cumulative path distance when hops are multibyte (2+ bytes per hop):

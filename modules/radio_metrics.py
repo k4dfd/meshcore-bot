@@ -7,15 +7,10 @@ from __future__ import annotations
 import math
 from typing import Optional
 
-# Cell-phone-style 4-segment signal meter. Ascending block heights, filled to the
-# level, '·' for empty segments. Level derived from packet RSSI (dBm).
-_BARS = {
-    4: "▂▄▆█",
-    3: "▂▄▆·",
-    2: "▂▄··",
-    1: "▂···",
-    0: "····",
-}
+# Green-square signal meter (bright, renders in color; unlike the monochrome block
+# glyphs, which some clients stretch/darken). Level derived from packet RSSI (dBm).
+_GREEN = "🟩"
+_EMPTY = "⬜"
 
 
 def signal_level(rssi: Optional[float]) -> int:
@@ -38,10 +33,23 @@ def signal_level(rssi: Optional[float]) -> int:
 
 
 def signal_bars(rssi: Optional[float]) -> str:
-    """Return a 4-segment bar glyph (e.g. '▂▄▆█') for the given RSSI, '' if unknown."""
+    """Compact green signal icon (📶) for the given RSSI, '' if unknown.
+
+    The single 📶 emoji renders as bright green cell-signal bars on phone clients
+    and stays compact on the one-line reply. Use ``signal_meter`` for a level-
+    filled green meter in the multi-line report.
+    """
     if rssi is None:
         return ""
-    return _BARS[signal_level(rssi)]
+    return "📶"
+
+
+def signal_meter(rssi: Optional[float]) -> str:
+    """4-segment green level meter (🟩 filled / ⬜ empty), '' if unknown."""
+    if rssi is None:
+        return ""
+    level = signal_level(rssi)
+    return _GREEN * level + _EMPTY * (4 - level)
 
 
 def airtime_ms(

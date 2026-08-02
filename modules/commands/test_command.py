@@ -13,7 +13,7 @@ from typing import Any, Optional
 from ..geocoder import nearest_city
 from ..link_quality import DEFAULT_RSSI_FLOOR_DBM, DEFAULT_SNR_FLOOR_DB, assess_link
 from ..models import MeshMessage
-from ..radio_metrics import format_airtime, signal_bars
+from ..radio_metrics import format_airtime, signal_bars, signal_meter
 from ..response_template import format_piped_template
 from ..telemetry_lpp import parse_lpp
 from ..utils import calculate_distance, extract_path_node_ids_from_message
@@ -166,9 +166,12 @@ class TestCommand(BaseCommand):
         """Match 'test', 't', 'test <phrase>', or 't <phrase>' (see _extract_phrase)."""
         return self._extract_phrase(message.content) is not None
 
+    # Metrics only — the personalized greeting ("Hi <node>, here's your test
+    # results:") is prepended in _build_default_report, so this no longer carries
+    # the sender/ack prefix.
     DEFAULT_FORMAT = (
-        "ack @[{sender}]{phrase_part} | {hops_label} | SNR {snr}dB RSSI {rssi}dBm {signal_icon} "
-        "| {reached}{reach_suffix} | {link_quality} link{batt_suffix} | {timestamp}"
+        "{hops_label} | SNR {snr}dB RSSI {rssi}dBm {signal_icon} "
+        "| {reached}{reach_suffix} | {link_quality} link{hash_suffix}{batt_suffix} | {timestamp}"
     )
 
     def get_response_format(self) -> Optional[str]:
@@ -276,22 +279,25 @@ class TestCommand(BaseCommand):
             if not hasattr(self, '_current_message') or not self._current_message:
                 return None
 
-            sender_pubkey = self._current_message.sender_pubkey
-            if not sender_pubkey:
+            sender_pubkey = getattr(self._current_message, 'sender_pubkey', None) or ''
+            sender_name = getattr(self._current_message, 'sender_id', None) or ''
+            if not sender_pubkey and not sender_name:
                 return None
 
-            # Look up sender location from database (any role, not just repeaters)
+            # Channel messages carry NO pubkey (sender is identified by name in the
+            # text), so match on public_key OR name — most recent advert/heard wins.
             query = '''
                 SELECT latitude, longitude
                 FROM complete_contact_tracking
-                WHERE public_key = ?
+                WHERE ( (? != '' AND public_key = ?) OR (? != '' AND name = ?) )
                 AND latitude IS NOT NULL AND longitude IS NOT NULL
                 AND latitude != 0 AND longitude != 0
                 ORDER BY COALESCE(last_advert_timestamp, last_heard) DESC
                 LIMIT 1
             '''
 
-            results = self.bot.db_manager.execute_query(query, (sender_pubkey,))
+            results = self.bot.db_manager.execute_query(
+                query, (sender_pubkey, sender_pubkey, sender_name, sender_name))
 
             if results:
                 row = results[0]
@@ -626,10 +632,11 @@ class TestCommand(BaseCommand):
             return ""  # No valid segments found
 
         # Format the result compactly
+        total_mi = self._km_to_mi(total_distance)
         if skipped_nodes > 0:
-            return f"{total_distance:.1f}km ({valid_segments} segs, {skipped_nodes} no-loc)"
+            return f"{total_mi:.1f}mi ({valid_segments} segs, {skipped_nodes} no-loc)"
         else:
-            return f"{total_distance:.1f}km ({valid_segments} segs)"
+            return f"{total_mi:.1f}mi ({valid_segments} segs)"
 
     def _calculate_firstlast_distance(self, message: MeshMessage) -> str:
         """Calculate straight-line distance between first and last repeater in path.
@@ -671,7 +678,7 @@ class TestCommand(BaseCommand):
             last_location[0], last_location[1]
         )
 
-        return f"{distance:.1f}km"
+        return f"{self._km_to_mi(distance):.1f}mi"
 
     # ── Enhanced link-report helpers ────────────────────────────────────────
     def _hops_value(self, message: MeshMessage) -> Optional[int]:
@@ -717,9 +724,13 @@ class TestCommand(BaseCommand):
         except Exception:
             return None
 
+    @staticmethod
+    def _km_to_mi(km: float) -> float:
+        return km * 0.621371
+
     def _reach_distance_str(self, message: MeshMessage) -> str:
         km = self._reach_distance_km(message)
-        return f"~{km:.1f} km" if km is not None else ""
+        return f"~{self._km_to_mi(km):.1f} mi" if km is not None else ""
 
     def _link(self, message: MeshMessage):
         return assess_link(
@@ -853,9 +864,19 @@ class TestCommand(BaseCommand):
         else:
             rt = routing.get('route_type')
             route_type = str(rt).lower() if rt else "routed"
+        # Path hash size (1B/2B per hop). Only meaningful on routed messages — a
+        # direct (0-hop) packet has no path hashes.
+        bph = routing.get('bytes_per_hop')
+        if bph and hops and hops > 0:
+            hash_bytes = f"{int(bph)}B hash"
+            hash_suffix = f" | {int(bph)}B hash"
+        else:
+            hash_bytes = ""
+            hash_suffix = ""
         return {
             'rssi': str(rssi) if rssi is not None else '—',
-            'signal_icon': signal_bars(rssi),
+            'signal_icon': signal_bars(rssi),   # compact 📶
+            'signal_meter': signal_meter(rssi),  # green level meter for full report
             'bot_city': bot_city or bot_name,
             'bot_name': bot_name,
             'reached': reached,
@@ -867,6 +888,8 @@ class TestCommand(BaseCommand):
             'quality_hint': link.hint,
             'link_margin': f"{margin}" if margin is not None else '—',
             'route_type': route_type,
+            'hash_bytes': hash_bytes,
+            'hash_suffix': hash_suffix,
             'airtime': format_airtime(routing.get('payload_length')),
             'path_bytes': self._path_bytes_str(message),
             'path_named': self._path_named(message),
@@ -874,6 +897,50 @@ class TestCommand(BaseCommand):
             'node_temp': f"{temp:.1f}" if temp is not None else '—',
             'batt_suffix': f" | batt {batt:.2f}V" if batt is not None else "",
         }
+
+    def _split_to_budget(self, text: str, budget: int) -> list[str]:
+        """Split text into <=budget-byte chunks, preferring ' | ' boundaries."""
+        if budget <= 0 or len(text.encode('utf-8')) <= budget:
+            return [text]
+        parts: list[str] = []
+        cur = ''
+        for seg in text.split(' | '):
+            candidate = seg if not cur else f"{cur} | {seg}"
+            if len(candidate.encode('utf-8')) <= budget:
+                cur = candidate
+                continue
+            if cur:
+                parts.append(cur)
+                cur = ''
+            if len(seg.encode('utf-8')) > budget:
+                parts.append(self._clip_to_budget(seg, budget))
+            else:
+                cur = seg
+        if cur:
+            parts.append(cur)
+        return parts
+
+    def _build_default_report(self, message: MeshMessage) -> list[str]:
+        """Personalized, auto-chunked default report:
+        "Hi <node>, here's your test results:" + the metrics line (split if long)."""
+        fields = self._assemble_fields(message)
+        sender = fields.get('sender') or 'there'
+        greeting = f"Hi {sender}, here's your test results:"
+        metrics = format_piped_template(
+            self.get_response_format(),
+            fields,
+            message=message,
+            logger=self.logger,
+            prefix_hex_chars=getattr(self.bot, 'prefix_hex_chars', 2),
+        )
+        try:
+            budget = int(self.get_max_message_length(message))
+        except Exception:
+            budget = 150
+        combined = f"{greeting} {metrics}"
+        if budget and len(combined.encode('utf-8')) <= budget:
+            return [combined]  # fits one message — no need to split
+        return [greeting] + self._split_to_budget(metrics, budget)
 
     def _clip_to_budget(self, text: str, budget: int) -> str:
         """UTF-8 byte-aware truncation to `budget` bytes (…-terminated) so a chunk
@@ -904,11 +971,14 @@ class TestCommand(BaseCommand):
         rssi = ef.get('rssi')
         rt = ef.get('route_type')
         at = ef.get('airtime')
-        line1 = f"@[{sender}] {ef.get('reached')}" + (f", {reach} from your node" if reach else "")
+        hb = ef.get('hash_bytes')
+        greeting = f"Hi {sender}, here's your test results:"
+        line1 = f"{ef.get('reached')}" + (f", {reach} from your node" if reach else "")
         line2 = (
             f"Link: {ef.get('hops_label')}"
             + (f" ({rt})" if rt else "")
-            + f" · SNR {snr}dB · RSSI {rssi}dBm {ef.get('signal_icon')} · "
+            + (f" · {hb}" if hb else "")
+            + f" · SNR {snr}dB · RSSI {rssi}dBm {ef.get('signal_meter')} · "
             + f"{ef.get('link_quality')} (margin {ef.get('link_margin')}dB)"
             + (f" · air {at}" if at else "")
         )
@@ -928,7 +998,8 @@ class TestCommand(BaseCommand):
         node = ""
         if self._node_batt is not None or self._node_temp is not None:
             node = f"Node: batt {ef.get('node_batt')}V · {ef.get('node_temp')}°C"
-        return [self._clip_to_budget(ln, budget) for ln in (line1, line2, line3, line4, node) if ln]
+        return [self._clip_to_budget(ln, budget)
+                for ln in (greeting, line1, line2, line3, line4, node) if ln]
 
     def _assemble_fields(self, message: MeshMessage) -> dict[str, str]:
         """Build the complete template field set (core + enhanced) for a message."""
@@ -1004,7 +1075,9 @@ class TestCommand(BaseCommand):
             chunks = self._build_full_report(message, fields)
             if chunks:
                 return await self.send_response_chunked(message, chunks)
-        return await self.handle_keyword_match(message)
+        # Default: personalized ("Hi <node>, here's your test results:") + metrics,
+        # auto-split into multiple messages when it won't fit one packet.
+        return await self.send_response_chunked(message, self._build_default_report(message))
 
     def _is_full_request(self, message: MeshMessage) -> bool:
         """True when the message is 'test full' / 't detail' etc."""

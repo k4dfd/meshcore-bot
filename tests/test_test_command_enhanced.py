@@ -66,14 +66,43 @@ def test_reached_wording_includes_bot_name_and_city():
     assert ef["reached"] == "Reached SWVAMESH-BOT in Fairlawn, VA"
 
 
-def test_signal_icon_reflects_strength():
+def test_signal_icon_and_meter():
     cmd = _cmd()
-    strong = cmd._enhanced_fields(mock_message(content="test", snr=10, rssi=-39, hops=0))
+    ef = cmd._enhanced_fields(mock_message(content="test", snr=10, rssi=-39, hops=0))
+    assert ef["signal_icon"] == "📶"            # compact green icon
+    assert ef["signal_meter"] == "🟩🟩🟩🟩"        # full green level meter
     weak = cmd._enhanced_fields(mock_message(content="test", snr=2, rssi=-100, hops=0))
-    assert strong["signal_icon"] == "▂▄▆█"      # full bars
-    assert weak["signal_icon"] == "▂···"         # one bar
+    assert weak["signal_meter"] == "🟩⬜⬜⬜"
     # unknown RSSI -> no icon (honest empty)
     assert cmd._enhanced_fields(mock_message(content="test", snr=5, rssi=None))["signal_icon"] == ""
+
+
+def test_hash_bytes_routed_only():
+    cmd = _cmd()
+    direct = cmd._enhanced_fields(mock_message(content="test", hops=0))
+    assert direct["hash_bytes"] == "" and direct["hash_suffix"] == ""  # no path -> no hash
+    routed = cmd._enhanced_fields(mock_message(
+        content="test", hops=3,
+        routing_info={"route_type": "FLOOD", "bytes_per_hop": 2, "payload_length": 80}))
+    assert routed["hash_bytes"] == "2B hash"
+    assert routed["hash_suffix"] == " | 2B hash"
+
+
+def test_distance_reported_in_miles():
+    from unittest.mock import patch
+    cmd = _cmd()
+    assert abs(cmd._km_to_mi(1.0) - 0.621371) < 1e-6
+    cmd._current_message = mock_message(content="test")
+    with patch.object(cmd, "_reach_distance_km", return_value=1.60934):  # ~1 mile
+        s = cmd._reach_distance_str(cmd._current_message)
+    assert s.endswith("mi") and "1.0" in s and "km" not in s
+
+
+def test_split_to_budget_no_data_lost():
+    cmd = _cmd()
+    parts = cmd._split_to_budget("aaa | bbb | ccc | ddd", 7)
+    assert all(len(p.encode("utf-8")) <= 7 for p in parts)
+    assert "".join(parts).count("a") == 3  # content preserved
 
 
 def test_route_type_direct_vs_routed():
@@ -95,14 +124,17 @@ def test_missing_rssi_is_honest_dash():
     assert ef["link_quality"] == "Unknown"
 
 
-def test_default_template_renders_with_new_fields():
+def test_default_report_is_personalized_and_has_metrics():
     cmd = _cmd()
     msg = mock_message(content="test", sender_id="YOURNODE", snr=8.5, rssi=-92, hops=2)
-    out = cmd.format_response(msg, cmd.DEFAULT_FORMAT)
-    assert "YOURNODE" in out
-    assert "Fairlawn, VA" in out
-    assert "SNR 8.5" in out and "RSSI -92" in out
-    assert "link" in out
+    cmd._current_message = msg
+    chunks = cmd._build_default_report(msg)
+    joined = " ".join(chunks)
+    assert chunks[0].startswith("Hi YOURNODE, here's your test results")
+    assert "Fairlawn, VA" in joined
+    assert "SNR 8.5" in joined and "RSSI -92" in joined
+    assert "📶" in joined
+    assert "link" in joined
 
 
 def test_full_request_detection():
@@ -125,7 +157,8 @@ def test_full_report_lines_built():
     msg = mock_message(content="test full", sender_id="YOURNODE", snr=8.5, rssi=-92, hops=2)
     fields = cmd._assemble_fields(msg)
     lines = cmd._build_full_report(msg, fields)
-    assert lines and lines[0].startswith("@[YOURNODE] Reached SWVAMESH-BOT in Fairlawn, VA")
+    assert lines and lines[0].startswith("Hi YOURNODE, here's your test results")
+    assert any(ln.startswith("Reached SWVAMESH-BOT in Fairlawn, VA") for ln in lines)
     assert any(line.startswith("Link:") for line in lines)
     assert any(line.startswith("Tune:") for line in lines)
 

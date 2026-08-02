@@ -5,6 +5,7 @@ from modules.radio_metrics import (
     format_airtime,
     signal_bars,
     signal_level,
+    signal_meter,
 )
 
 
@@ -18,12 +19,18 @@ def test_signal_level_thresholds():
     assert signal_level(None) == 0
 
 
-def test_signal_bars_glyphs():
-    assert signal_bars(-39) == "▂▄▆█"   # full
-    assert signal_bars(-80) == "▂▄··"
-    assert signal_bars(None) == ""        # unknown -> empty, not fabricated
-    # every non-None result is a 4-segment meter
-    assert len(signal_bars(-95)) == 4
+def test_signal_icon_is_green_emoji():
+    assert signal_bars(-39) == "📶"        # bright green cell-signal icon
+    assert signal_bars(-95) == "📶"
+    assert signal_bars(None) == ""          # unknown -> empty, not fabricated
+
+
+def test_signal_meter_green_level():
+    assert signal_meter(-39) == "🟩🟩🟩🟩"   # full green
+    assert signal_meter(-61) == "🟩🟩🟩⬜"
+    assert signal_meter(-80) == "🟩🟩⬜⬜"
+    assert signal_meter(-120) == "⬜⬜⬜⬜"
+    assert signal_meter(None) == ""
 
 
 def test_airtime_sf7_bw62500_reasonable():
