@@ -13,6 +13,7 @@ from typing import Any, Optional
 from ..geocoder import nearest_city
 from ..link_quality import DEFAULT_RSSI_FLOOR_DBM, DEFAULT_SNR_FLOOR_DB, assess_link
 from ..models import MeshMessage
+from ..radio_metrics import format_airtime, signal_bars
 from ..response_template import format_piped_template
 from ..telemetry_lpp import parse_lpp
 from ..utils import calculate_distance, extract_path_node_ids_from_message
@@ -166,8 +167,8 @@ class TestCommand(BaseCommand):
         return self._extract_phrase(message.content) is not None
 
     DEFAULT_FORMAT = (
-        "ack @[{sender}]{phrase_part} | {hops_label} | SNR {snr}dB RSSI {rssi}dBm "
-        "| reached {bot_city}{reach_suffix} | {link_quality} link{batt_suffix}"
+        "ack @[{sender}]{phrase_part} | {hops_label} | SNR {snr}dB RSSI {rssi}dBm {signal_icon} "
+        "| {reached}{reach_suffix} | {link_quality} link{batt_suffix} | {timestamp}"
     )
 
     def get_response_format(self) -> Optional[str]:
@@ -839,18 +840,34 @@ class TestCommand(BaseCommand):
         rssi = getattr(message, 'rssi', None)
         reach = self._reach_distance_str(message)
         bot_city = self._bot_city()
+        bot_name = self.bot.config.get('Bot', 'bot_name', fallback='') or 'the bot'
         batt = self._node_batt
         temp = self._node_temp
         margin = link.margin_db
+        # "Reached <bot> in <City, ST>" (drop "in <city>" when the city is unknown).
+        reached = f"Reached {bot_name} in {bot_city}" if bot_city else f"Reached {bot_name}"
+        routing = getattr(message, 'routing_info', None) or {}
+        hops = self._hops_value(message)
+        if hops == 0:
+            route_type = "direct"
+        else:
+            rt = routing.get('route_type')
+            route_type = str(rt).lower() if rt else "routed"
         return {
             'rssi': str(rssi) if rssi is not None else '—',
-            'bot_city': bot_city or (self.bot.config.get('Bot', 'bot_name', fallback='') or 'bot'),
+            'signal_icon': signal_bars(rssi),
+            'bot_city': bot_city or bot_name,
+            'bot_name': bot_name,
+            'reached': reached,
             'sender_city': self._sender_city(message),
             'reach_distance': reach,
-            'reach_suffix': f" ({reach})" if reach else "",
+            # phrased for the compact line; the full report spells it out too
+            'reach_suffix': f" ({reach} from your node)" if reach else "",
             'link_quality': link.verdict,
             'quality_hint': link.hint,
             'link_margin': f"{margin}" if margin is not None else '—',
+            'route_type': route_type,
+            'airtime': format_airtime(routing.get('payload_length')),
             'path_bytes': self._path_bytes_str(message),
             'path_named': self._path_named(message),
             'node_batt': f"{batt:.2f}" if batt is not None else '—',
@@ -882,14 +899,19 @@ class TestCommand(BaseCommand):
         except Exception:
             budget = 150
         sender = ef.get('sender') or 'node'
-        bot_name = self.bot.config.get('Bot', 'bot_name', fallback='bot') or 'bot'
-        bot_city = ef.get('bot_city') or bot_name
         reach = ef.get('reach_distance')
         snr = ef.get('snr')
         rssi = ef.get('rssi')
-        line1 = f"@[{sender}] reached {bot_name} ({bot_city})" + (f", {reach}" if reach else "")
-        line2 = (f"Link: {ef.get('hops_label')} · SNR {snr}dB · RSSI {rssi}dBm · "
-                 f"{ef.get('link_quality')} (margin {ef.get('link_margin')}dB)")
+        rt = ef.get('route_type')
+        at = ef.get('airtime')
+        line1 = f"@[{sender}] {ef.get('reached')}" + (f", {reach} from your node" if reach else "")
+        line2 = (
+            f"Link: {ef.get('hops_label')}"
+            + (f" ({rt})" if rt else "")
+            + f" · SNR {snr}dB · RSSI {rssi}dBm {ef.get('signal_icon')} · "
+            + f"{ef.get('link_quality')} (margin {ef.get('link_margin')}dB)"
+            + (f" · air {at}" if at else "")
+        )
         pn = ef.get('path_named')
         pb = ef.get('path_bytes')
         line3 = ""

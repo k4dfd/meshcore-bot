@@ -60,6 +60,32 @@ def test_enhanced_fields_have_rssi_and_quality():
     assert ef["quality_hint"]  # non-empty actionable hint
 
 
+def test_reached_wording_includes_bot_name_and_city():
+    cmd = _cmd()
+    ef = cmd._enhanced_fields(mock_message(content="test", snr=8, rssi=-70, hops=1))
+    assert ef["reached"] == "Reached SWVAMESH-BOT in Fairlawn, VA"
+
+
+def test_signal_icon_reflects_strength():
+    cmd = _cmd()
+    strong = cmd._enhanced_fields(mock_message(content="test", snr=10, rssi=-39, hops=0))
+    weak = cmd._enhanced_fields(mock_message(content="test", snr=2, rssi=-100, hops=0))
+    assert strong["signal_icon"] == "▂▄▆█"      # full bars
+    assert weak["signal_icon"] == "▂···"         # one bar
+    # unknown RSSI -> no icon (honest empty)
+    assert cmd._enhanced_fields(mock_message(content="test", snr=5, rssi=None))["signal_icon"] == ""
+
+
+def test_route_type_direct_vs_routed():
+    cmd = _cmd()
+    assert cmd._enhanced_fields(mock_message(content="test", hops=0))["route_type"] == "direct"
+    routed = cmd._enhanced_fields(
+        mock_message(content="test", hops=3, routing_info={"route_type": "FLOOD", "payload_length": 80})
+    )
+    assert routed["route_type"] == "flood"
+    assert routed["airtime"].endswith(("ms", "s"))
+
+
 def test_missing_rssi_is_honest_dash():
     cmd = _cmd()
     msg = mock_message(content="test", snr=None, rssi=None, hops=0)
@@ -99,7 +125,7 @@ def test_full_report_lines_built():
     msg = mock_message(content="test full", sender_id="YOURNODE", snr=8.5, rssi=-92, hops=2)
     fields = cmd._assemble_fields(msg)
     lines = cmd._build_full_report(msg, fields)
-    assert lines and lines[0].startswith("@[YOURNODE] reached SWVAMESH-BOT")
+    assert lines and lines[0].startswith("@[YOURNODE] Reached SWVAMESH-BOT in Fairlawn, VA")
     assert any(line.startswith("Link:") for line in lines)
     assert any(line.startswith("Tune:") for line in lines)
 
