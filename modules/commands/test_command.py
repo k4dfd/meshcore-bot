@@ -4,13 +4,17 @@ Test command for the MeshCore Bot
 Handles the 'test' keyword response
 """
 
+import asyncio
 import math
 import re
 from datetime import datetime
 from typing import Any, Optional
 
+from ..geocoder import nearest_city
+from ..link_quality import DEFAULT_RSSI_FLOOR_DBM, DEFAULT_SNR_FLOOR_DB, assess_link
 from ..models import MeshMessage
 from ..response_template import format_piped_template
+from ..telemetry_lpp import parse_lpp
 from ..utils import calculate_distance, extract_path_node_ids_from_message
 from .base_command import BaseCommand
 
@@ -63,6 +67,42 @@ class TestCommand(BaseCommand):
                         self.logger.warning(f"Invalid bot coordinates in config: {lat}, {lon}")
         except Exception as e:
             self.logger.warning(f"Error reading bot location from config: {e}")
+
+        # ── Enhanced link-report options (all additive; safe defaults) ──────────
+        # Nearest-city naming (offline geocoder). A non-empty bot_city_label
+        # forces the bot's displayed city (e.g. "Radford, VA") instead of the
+        # geocoded nearest place.
+        self.geocode_enabled = self.get_config_value(
+            'Test_Command', 'geocode_enabled', fallback=True, value_type='bool')
+        self.bot_city_label = self._strip_quotes_from_config(
+            self.get_config_value('Test_Command', 'bot_city_label', fallback='') or '').strip()
+        # Bounded, best-effort telemetry pull from the sender's node.
+        self.telemetry_in_test = self.get_config_value(
+            'Test_Command', 'telemetry_in_test', fallback=True, value_type='bool')
+        try:
+            self.telemetry_timeout = max(
+                1.0, min(8.0, bot.config.getfloat(
+                    'Test_Command', 'telemetry_timeout_seconds', fallback=3.0)))
+        except Exception:
+            self.telemetry_timeout = 3.0
+        # Link-quality floors (SF7/BW62.5 defaults; override for other presets).
+        try:
+            self.snr_floor_db = bot.config.getfloat(
+                'Test_Command', 'snr_floor_db', fallback=DEFAULT_SNR_FLOOR_DB)
+        except Exception:
+            self.snr_floor_db = DEFAULT_SNR_FLOOR_DB
+        try:
+            self.rssi_floor_dbm = bot.config.getfloat(
+                'Test_Command', 'rssi_floor_dbm', fallback=DEFAULT_RSSI_FLOOR_DBM)
+        except Exception:
+            self.rssi_floor_dbm = DEFAULT_RSSI_FLOOR_DBM
+        self.full_enabled = self.get_config_value(
+            'Test_Command', 'full_report_enabled', fallback=True, value_type='bool')
+        self._bot_city_cache: Optional[str] = None
+        # Per-execute stash for telemetry (set in execute(), read in format).
+        self._node_batt: Optional[float] = None
+        self._node_temp: Optional[float] = None
+        self._node_humidity: Optional[float] = None
 
     def can_execute(self, message: MeshMessage, skip_channel_check: bool = False) -> bool:
         """Check if this command can be executed with the given message.
@@ -134,7 +174,10 @@ class TestCommand(BaseCommand):
 
         return False
 
-    DEFAULT_FORMAT = "ack @[{sender}]{phrase_part} | {connection_info} | Received at: {timestamp}"
+    DEFAULT_FORMAT = (
+        "ack @[{sender}]{phrase_part} | {hops_label} | SNR {snr}dB RSSI {rssi}dBm "
+        "| reached {bot_city}{reach_suffix} | {link_quality} link{batt_suffix}"
+    )
 
     def get_response_format(self) -> Optional[str]:
         """Get the response format from config, falling back to the built-in default.
@@ -638,72 +681,254 @@ class TestCommand(BaseCommand):
 
         return f"{distance:.1f}km"
 
-    def format_response(self, message: MeshMessage, response_format: str) -> str:
-        """Override to handle phrase extraction.
+    # ── Enhanced link-report helpers ────────────────────────────────────────
+    def _hops_value(self, message: MeshMessage) -> Optional[int]:
+        """Best hop count: message.hops, else routing_info.path_length/len(path_nodes)."""
+        if getattr(message, 'hops', None) is not None:
+            return message.hops
+        routing_info = getattr(message, 'routing_info', None)
+        if routing_info is not None:
+            hv = routing_info.get('path_length')
+            if hv is None and routing_info.get('path_nodes'):
+                hv = len(routing_info['path_nodes'])
+            return hv
+        return None
 
-        Args:
-            message: The original message.
-            response_format: The format string.
+    def _bot_city(self) -> str:
+        """Bot's displayed city: config label override, else geocoded nearest place."""
+        if self.bot_city_label:
+            return self.bot_city_label
+        if self._bot_city_cache is not None:
+            return self._bot_city_cache
+        city = ""
+        if self.geocode_enabled and self.bot_latitude is not None and self.bot_longitude is not None:
+            city = nearest_city(self.bot_latitude, self.bot_longitude) or ""
+        self._bot_city_cache = city
+        return city
 
-        Returns:
-            str: Formatted response string.
+    def _sender_city(self, message: MeshMessage) -> str:
+        """Nearest city of the sender's node (needs an advertised location)."""
+        if not self.geocode_enabled:
+            return ""
+        loc = self._get_sender_location()
+        if not loc:
+            return ""
+        return nearest_city(loc[0], loc[1]) or ""
+
+    def _reach_distance_km(self, message: MeshMessage) -> Optional[float]:
+        """Straight-line km from the sender's node to the bot (None if unknown)."""
+        loc = self._get_sender_location()
+        if not loc or self.bot_latitude is None or self.bot_longitude is None:
+            return None
+        try:
+            return calculate_distance(loc[0], loc[1], self.bot_latitude, self.bot_longitude)
+        except Exception:
+            return None
+
+    def _reach_distance_str(self, message: MeshMessage) -> str:
+        km = self._reach_distance_km(message)
+        return f"~{km:.1f} km" if km is not None else ""
+
+    def _link(self, message: MeshMessage):
+        return assess_link(
+            getattr(message, 'snr', None),
+            getattr(message, 'rssi', None),
+            self._hops_value(message),
+            snr_floor_db=self.snr_floor_db,
+            rssi_floor_dbm=self.rssi_floor_dbm,
+        )
+
+    def _path_bytes_str(self, message: MeshMessage) -> str:
+        routing_info = getattr(message, 'routing_info', None) or {}
+        bph = routing_info.get('bytes_per_hop')
+        hops = self._hops_value(message)
+        if bph and hops:
+            return f"{int(bph) * int(hops)}B path"
+        path_hex = routing_info.get('path_hex')
+        if path_hex:
+            return f"{len(path_hex) // 2}B path"
+        return ""
+
+    def _lookup_repeater_name(self, node_id: str) -> Optional[str]:
+        """Most-recent repeater/roomserver name for a node-id prefix, or None."""
+        try:
+            if not hasattr(self.bot, 'db_manager'):
+                return None
+            query = '''
+                SELECT name FROM complete_contact_tracking
+                WHERE public_key LIKE ? AND role IN ('repeater', 'roomserver')
+                AND name IS NOT NULL AND name != ''
+                ORDER BY is_starred DESC, COALESCE(last_advert_timestamp, last_heard) DESC
+                LIMIT 1
+            '''
+            results = self.bot.db_manager.execute_query(query, (f"{node_id}%",))
+            if results:
+                return results[0].get('name')
+            return None
+        except Exception as e:
+            self.logger.debug(f"repeater name lookup failed for {node_id}: {e}")
+            return None
+
+    def _path_named(self, message: MeshMessage) -> str:
+        """Human path 'NAME (City) > NAME (City)' from the multi-byte path nodes."""
+        node_ids = self._extract_path_node_ids(message)
+        if not node_ids:
+            return ""
+        parts = []
+        for nid in node_ids:
+            label = self._lookup_repeater_name(nid) or nid
+            loc = self._lookup_repeater_location(nid, path_context=node_ids)
+            city = nearest_city(loc[0], loc[1]) if (loc and self.geocode_enabled) else None
+            parts.append(f"{label} ({city})" if city else label)
+        return " > ".join(parts)
+
+    def _split_mode(self, phrase: str) -> tuple[bool, str]:
+        """Detect a leading verbosity token ('full'/'detail'/'-v') → (full, phrase)."""
+        p = (phrase or "").strip()
+        low = p.lower()
+        for tok in ("full", "details", "detail", "verbose", "-v", "-f"):
+            if low == tok:
+                return True, ""
+            if low.startswith(tok + " "):
+                return True, p[len(tok):].strip()
+        return False, p
+
+    def _find_contact(self, pubkey: Optional[str]) -> Optional[dict]:
+        """Locate the sender's contact dict for a telemetry request (by pubkey)."""
+        if not pubkey:
+            return None
+        mc = getattr(self.bot, 'meshcore', None)
+        contacts = getattr(mc, 'contacts', None) or {}
+        try:
+            for _k, cd in contacts.items():
+                pk = cd.get('public_key', '')
+                if pk and (pk == pubkey or pk.startswith(pubkey) or pubkey.startswith(pk)):
+                    return cd
+        except Exception:
+            return None
+        return None
+
+    async def _pull_node_telemetry(self, message: MeshMessage) -> tuple[Optional[float], Optional[float], Optional[float]]:
+        """Bounded, best-effort telemetry pull from the sender's node.
+
+        Returns (battery_v, temp_c, humidity_pct); any of them None when the node
+        doesn't answer in time (repeaters need login; some nodes disable telemetry)
+        or on any error — the caller then shows an honest "—".
         """
-        # Clean content to remove control characters and normalize whitespace
-        content = self.clean_content(message.content)
+        if not self.telemetry_in_test:
+            return (None, None, None)
+        try:
+            contact = self._find_contact(getattr(message, 'sender_pubkey', None))
+            if not contact:
+                return (None, None, None)
+            mc = self.bot.meshcore
+            lpp = await asyncio.wait_for(
+                mc.commands.req_telemetry_sync(contact, timeout=self.telemetry_timeout),
+                timeout=self.telemetry_timeout + 1.5,
+            )
+            parsed = parse_lpp(lpp)
+            return (parsed['battery_v'], parsed['temp_c'], parsed['humidity_pct'])
+        except (asyncio.TimeoutError, Exception) as e:
+            self.logger.debug(f"test telemetry pull failed/timed out: {e}")
+            return (None, None, None)
 
-        # Strip exclamation mark if present (for command-style messages)
+    def _enhanced_fields(self, message: MeshMessage) -> dict[str, str]:
+        """Derived display fields for the response template (all honest-empty)."""
+        link = self._link(message)
+        rssi = getattr(message, 'rssi', None)
+        reach = self._reach_distance_str(message)
+        bot_city = self._bot_city()
+        batt = self._node_batt
+        temp = self._node_temp
+        margin = link.margin_db
+        return {
+            'rssi': str(rssi) if rssi is not None else '—',
+            'bot_city': bot_city or (self.bot.config.get('Bot', 'bot_name', fallback='') or 'bot'),
+            'sender_city': self._sender_city(message),
+            'reach_distance': reach,
+            'reach_suffix': f" ({reach})" if reach else "",
+            'link_quality': link.verdict,
+            'quality_hint': link.hint,
+            'link_margin': f"{margin}" if margin is not None else '—',
+            'path_bytes': self._path_bytes_str(message),
+            'path_named': self._path_named(message),
+            'node_batt': f"{batt:.2f}" if batt is not None else '—',
+            'node_temp': f"{temp:.1f}" if temp is not None else '—',
+            'batt_suffix': f" | batt {batt:.2f}V" if batt is not None else "",
+        }
+
+    def _build_full_report(self, message: MeshMessage, base_fields: dict[str, str]) -> list[str]:
+        """Multi-line detailed report for 'test full' (empty lines dropped)."""
+        ef = base_fields
+        sender = ef.get('sender') or 'node'
+        bot_name = self.bot.config.get('Bot', 'bot_name', fallback='bot') or 'bot'
+        bot_city = ef.get('bot_city') or bot_name
+        reach = ef.get('reach_distance')
+        snr = ef.get('snr')
+        rssi = ef.get('rssi')
+        line1 = f"@[{sender}] reached {bot_name} ({bot_city})" + (f", {reach}" if reach else "")
+        line2 = (f"Link: {ef.get('hops_label')} · SNR {snr}dB · RSSI {rssi}dBm · "
+                 f"{ef.get('link_quality')} (margin {ef.get('link_margin')}dB)")
+        pn = ef.get('path_named')
+        pb = ef.get('path_bytes')
+        line3 = ""
+        if pn:
+            line3 = f"Path: {pn}" + (f" · {pb}" if pb else "")
+        elif pb:
+            line3 = f"Path: {pb}"
+        hint = ef.get('quality_hint')
+        line4 = f"Tune: {hint}" if hint else ""
+        node = ""
+        if self._node_batt is not None or self._node_temp is not None:
+            node = f"Node: batt {ef.get('node_batt')}V · {ef.get('node_temp')}°C"
+        return [ln for ln in (line1, line2, line3, line4, node) if ln]
+
+    def _assemble_fields(self, message: MeshMessage) -> dict[str, str]:
+        """Build the complete template field set (core + enhanced) for a message."""
+        content = self.clean_content(message.content)
         if content.startswith('!'):
             content = content[1:].strip()
-
-        # Extract phrase if present, otherwise use empty string
-        if content.lower() == "test" or content.lower() == "t":
+        if content.lower() in ("test", "t"):
             phrase = ""
         elif content.startswith('test ') or content.startswith('Test '):
-            phrase = content[5:].strip()  # Get everything after "test "
+            phrase = content[5:].strip()
         elif content.startswith('t ') or content.startswith('T '):
-            phrase = content[2:].strip()  # Get everything after "t "
+            phrase = content[2:].strip()
         else:
             phrase = ""
+        # Strip a leading verbosity token ('full'/'detail') so it isn't echoed.
+        _full, phrase = self._split_mode(phrase)
 
+        hops_val = self._hops_value(message)
+        hops_str = str(hops_val) if hops_val is not None else "?"
+        if hops_val is None:
+            hops_label = "?"
+        elif hops_val == 1:
+            hops_label = "1 hop"
+        else:
+            hops_label = f"{hops_val} hops"
+        phrase_part = f": {phrase}" if phrase else ""
+        fields = {
+            'sender': message.sender_id or self.translate('common.unknown_sender'),
+            'phrase': phrase,
+            'phrase_part': phrase_part,
+            'connection_info': self.build_enhanced_connection_info(message),
+            'path': self.get_path_display_string(message),
+            'hops': hops_str,
+            'hops_label': hops_label,
+            'timestamp': self.format_timestamp(message),
+            'elapsed': self.format_elapsed(message),
+            'snr': str(message.snr) if message.snr is not None else self.translate('common.unknown'),
+            'path_distance': self._calculate_path_distance(message) or '',
+            'firstlast_distance': self._calculate_firstlast_distance(message) or '',
+        }
+        fields.update(self._enhanced_fields(message))
+        return fields
+
+    def format_response(self, message: MeshMessage, response_format: str) -> str:
+        """Render the single-line response from the configured template."""
         try:
-            connection_info = self.build_enhanced_connection_info(message)
-            timestamp = self.format_timestamp(message)
-            elapsed = self.format_elapsed(message)
-            path_display = self.get_path_display_string(message)
-            # Hops: from message.hops, or routing_info.path_length, or len(path_nodes)
-            routing_info = getattr(message, 'routing_info', None)
-            if getattr(message, 'hops', None) is not None:
-                hops_val = message.hops
-            elif routing_info is not None:
-                hops_val = routing_info.get('path_length')
-                if hops_val is None and routing_info.get('path_nodes'):
-                    hops_val = len(routing_info['path_nodes'])
-            else:
-                hops_val = None
-            hops_str = str(hops_val) if hops_val is not None else "?"
-            if hops_val is None:
-                hops_label = "?"
-            elif hops_val == 1:
-                hops_label = "1 hop"
-            else:
-                hops_label = f"{hops_val} hops"
-            path_distance = self._calculate_path_distance(message)
-            firstlast_distance = self._calculate_firstlast_distance(message)
-            phrase_part = f": {phrase}" if phrase else ""
-            fields = {
-                'sender': message.sender_id or self.translate('common.unknown_sender'),
-                'phrase': phrase,
-                'phrase_part': phrase_part,
-                'connection_info': connection_info,
-                'path': path_display,
-                'hops': hops_str,
-                'hops_label': hops_label,
-                'timestamp': timestamp,
-                'elapsed': elapsed,
-                'snr': str(message.snr) if message.snr is not None else self.translate('common.unknown'),
-                'path_distance': path_distance or '',
-                'firstlast_distance': firstlast_distance or '',
-            }
+            fields = self._assemble_fields(message)
             return format_piped_template(
                 response_format,
                 fields,
@@ -729,4 +954,33 @@ class TestCommand(BaseCommand):
 
         # Store the current message for use in location lookups
         self._current_message = message
+        # Reset per-execute telemetry stash.
+        self._node_batt = self._node_temp = self._node_humidity = None
+        # Bounded, best-effort telemetry pull (included in the default test).
+        if self.telemetry_in_test:
+            self._node_batt, self._node_temp, self._node_humidity = (
+                await self._pull_node_telemetry(message)
+            )
+        # 'test full' / 'test detail' → multi-part detailed report.
+        if self.full_enabled and self._is_full_request(message):
+            fields = self._assemble_fields(message)
+            chunks = self._build_full_report(message, fields)
+            if chunks:
+                return await self.send_response_chunked(message, chunks)
         return await self.handle_keyword_match(message)
+
+    def _is_full_request(self, message: MeshMessage) -> bool:
+        """True when the message is 'test full' / 't detail' etc."""
+        content = self.clean_content(message.content)
+        if content.startswith('!'):
+            content = content[1:].strip()
+        if content.lower() in ("test", "t"):
+            return False
+        if content.startswith('test ') or content.startswith('Test '):
+            phrase = content[5:].strip()
+        elif content.startswith('t ') or content.startswith('T '):
+            phrase = content[2:].strip()
+        else:
+            return False
+        full, _ = self._split_mode(phrase)
+        return full
