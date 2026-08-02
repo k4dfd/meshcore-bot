@@ -1516,6 +1516,65 @@ class BotDataViewer:
             self.logger.info(f"Log rotation config updated: {', '.join(saved)}")
             return jsonify({'success': True, 'saved': saved})
 
+        @self.app.route('/api/config/admin')
+        def api_config_admin_get():
+            """List admin nodes ([Admin_ACL] admin_pubkeys) + known contacts for the picker."""
+            raw = self.config.get('Admin_ACL', 'admin_pubkeys', fallback='') if self.config.has_section('Admin_ACL') else ''
+            keys = [k.strip().lower() for k in raw.split(',') if k.strip()]
+            names = {}
+            contacts = []
+            try:
+                with self.db_manager.connection() as conn:
+                    conn.row_factory = sqlite3.Row
+                    for r in conn.execute("SELECT public_key, name, role FROM complete_contact_tracking ORDER BY name"):
+                        pk = (r['public_key'] or '').strip().lower()
+                        if len(pk) != 64:
+                            continue
+                        names[pk] = r['name']
+                        contacts.append({'pubkey': pk, 'name': r['name'], 'role': r['role']})
+            except Exception as exc:  # noqa: BLE001 - contacts are best-effort for the picker
+                self.logger.debug("admin panel: contact lookup failed: %s", exc)
+            admins = [{'pubkey': k, 'name': names.get(k, '')} for k in keys]
+            return jsonify({'admins': admins, 'contacts': contacts})
+
+        @self.app.route('/api/config/admin', methods=['POST'])
+        def api_config_admin_post():
+            """Add or remove an admin node in [Admin_ACL] admin_pubkeys, then queue a live reload.
+            Body: {"action": "add"|"remove", "pubkey": "<64-hex>"}."""
+            data = request.get_json(silent=True) or {}
+            action = str(data.get('action', '')).lower()
+            pubkey = str(data.get('pubkey', '')).strip().lower()
+            if action not in ('add', 'remove'):
+                return jsonify({'success': False, 'error': 'action must be "add" or "remove"'}), 400
+            if not re.fullmatch(r'[0-9a-f]{64}', pubkey):
+                return jsonify({'success': False, 'error': 'pubkey must be exactly 64 hexadecimal characters'}), 400
+            if not self.config.has_section('Admin_ACL'):
+                self.config.add_section('Admin_ACL')
+            raw = self.config.get('Admin_ACL', 'admin_pubkeys', fallback='')
+            keys = [k.strip().lower() for k in raw.split(',') if k.strip()]
+            if action == 'add':
+                if pubkey not in keys:
+                    keys.append(pubkey)
+            else:
+                keys = [k for k in keys if k != pubkey]
+            self.config.set('Admin_ACL', 'admin_pubkeys', ','.join(keys))
+            try:
+                with open(self.config_path, 'w') as fh:
+                    self.config.write(fh)
+            except OSError as exc:
+                self.logger.error("Failed to write admin_pubkeys to config.ini: %s", exc)
+                return jsonify({'success': False, 'error': 'Could not write config.ini — check file permissions'}), 500
+            reload_queued = False
+            try:
+                with self.db_manager.connection() as conn:
+                    conn.execute("INSERT INTO channel_operations (operation_type, status) VALUES ('reload_config', 'pending')")
+                    conn.commit()
+                reload_queued = True
+            except Exception as exc:  # noqa: BLE001 - saved to disk regardless; reload is best-effort
+                self.logger.warning("admin_pubkeys saved but reload queue failed: %s", exc)
+            self.logger.info("Admin ACL %s %s… — %d admin(s) now", action, pubkey[:12], len(keys))
+            return jsonify({'success': True, 'action': action, 'count': len(keys), 'reload_queued': reload_queued})
+
         # ── Maintenance config ───────────────────────────────────────────────
 
         @self.app.route('/api/config/maintenance')

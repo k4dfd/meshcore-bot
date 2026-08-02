@@ -54,6 +54,193 @@
 
 {% block content %}
 <div class="container-fluid">
+    <section class="card admin-config-section mb-4" id="admin-nodes-card">
+        <div class="card-header">
+            <h2 class="h5 mb-0"><i class="fas fa-user-shield me-2"></i>Admin Nodes</h2>
+        </div>
+        <div class="card-body">
+            <p class="small text-muted mb-3">
+                Public keys authorized as admins (<code>[Admin_ACL] admin_pubkeys</code>).
+                Changes are written to <code>config.ini</code> and applied live (no restart).
+            </p>
+            <div class="table-responsive mb-3">
+                <table class="table admin-config-table align-middle mb-0">
+                    <thead>
+                        <tr>
+                            <th scope="col">Name</th>
+                            <th scope="col">Public key</th>
+                            <th scope="col" class="text-end">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="admin-table-body">
+                        <tr><td colspan="3" class="text-muted small">Loading…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="row g-2 align-items-end">
+                <div class="col-12 col-md-5">
+                    <label for="admin-add-select" class="form-label small mb-1">Add from contacts</label>
+                    <select id="admin-add-select" class="form-select form-select-sm">
+                        <option value="">— select a contact —</option>
+                    </select>
+                </div>
+                <div class="col-12 col-md-5">
+                    <label for="admin-add-key" class="form-label small mb-1">…or paste a 64-hex public key</label>
+                    <input type="text" id="admin-add-key" class="form-control form-control-sm admin-config-value"
+                           placeholder="64 hexadecimal characters" maxlength="64" autocomplete="off" spellcheck="false">
+                </div>
+                <div class="col-12 col-md-2 d-grid">
+                    <button type="button" id="admin-add-btn" class="btn btn-sm btn-primary">
+                        <i class="fas fa-plus me-1"></i>Add
+                    </button>
+                </div>
+            </div>
+            <div id="admin-status" class="small mt-2" role="status" aria-live="polite"></div>
+        </div>
+    </section>
+
+    <script>
+    (function () {
+        var HEX64 = /^[0-9a-f]{64}$/;
+        var tbody = document.getElementById('admin-table-body');
+        var select = document.getElementById('admin-add-select');
+        var keyInput = document.getElementById('admin-add-key');
+        var addBtn = document.getElementById('admin-add-btn');
+        var statusEl = document.getElementById('admin-status');
+
+        function setStatus(msg, kind) {
+            statusEl.textContent = msg || '';
+            statusEl.className = 'small mt-2' + (kind ? ' text-' + kind : '');
+        }
+
+        function shortKey(pk) {
+            return pk.length === 64 ? pk.slice(0, 12) + '…' + pk.slice(-6) : pk;
+        }
+
+        function renderAdmins(admins) {
+            tbody.innerHTML = '';
+            if (!admins.length) {
+                var tr = document.createElement('tr');
+                var td = document.createElement('td');
+                td.colSpan = 3;
+                td.className = 'text-muted small';
+                td.textContent = 'No admin nodes configured.';
+                tr.appendChild(td);
+                tbody.appendChild(tr);
+                return;
+            }
+            admins.forEach(function (a) {
+                var tr = document.createElement('tr');
+
+                var nameTd = document.createElement('td');
+                nameTd.textContent = a.name || '(unknown)';
+                tr.appendChild(nameTd);
+
+                var keyTd = document.createElement('td');
+                var code = document.createElement('code');
+                code.className = 'admin-config-value';
+                code.title = a.pubkey;
+                code.textContent = shortKey(a.pubkey);
+                keyTd.appendChild(code);
+                tr.appendChild(keyTd);
+
+                var actTd = document.createElement('td');
+                actTd.className = 'text-end';
+                var btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'btn btn-sm btn-danger';
+                btn.innerHTML = '<i class="fas fa-trash-alt me-1"></i>Remove';
+                btn.addEventListener('click', function () { removeAdmin(a.pubkey, a.name); });
+                actTd.appendChild(btn);
+                tr.appendChild(actTd);
+
+                tbody.appendChild(tr);
+            });
+        }
+
+        function populateSelect(contacts, admins) {
+            var adminSet = {};
+            admins.forEach(function (a) { adminSet[a.pubkey] = true; });
+            select.innerHTML = '<option value="">— select a contact —</option>';
+            contacts.forEach(function (c) {
+                if (adminSet[c.pubkey]) { return; }
+                var opt = document.createElement('option');
+                opt.value = c.pubkey;
+                opt.textContent = c.name + (c.role ? ' (' + c.role + ')' : '');
+                select.appendChild(opt);
+            });
+        }
+
+        function loadAdmins() {
+            fetch('/api/config/admin')
+                .then(function (r) { return r.json(); })
+                .then(function (data) {
+                    var admins = data.admins || [];
+                    renderAdmins(admins);
+                    populateSelect(data.contacts || [], admins);
+                })
+                .catch(function (err) {
+                    setStatus('Failed to load admin nodes: ' + err, 'danger');
+                });
+        }
+
+        function postAction(action, pubkey) {
+            return fetch('/api/config/admin', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Requested-With': 'XMLHttpRequest'
+                },
+                body: JSON.stringify({ action: action, pubkey: pubkey })
+            }).then(function (r) {
+                return r.json().then(function (body) { return { ok: r.ok, body: body }; });
+            });
+        }
+
+        function addAdmin() {
+            var pasted = (keyInput.value || '').trim().toLowerCase();
+            var pubkey = HEX64.test(pasted) ? pasted : (select.value || '');
+            if (!HEX64.test(pubkey)) {
+                setStatus('Enter a valid 64-hex public key or pick a contact.', 'danger');
+                return;
+            }
+            addBtn.disabled = true;
+            postAction('add', pubkey).then(function (res) {
+                if (res.ok && res.body.success) {
+                    keyInput.value = '';
+                    select.value = '';
+                    setStatus('Added — applying…', 'success');
+                    loadAdmins();
+                } else {
+                    setStatus(res.body.error || 'Add failed.', 'danger');
+                }
+            }).catch(function (err) {
+                setStatus('Add failed: ' + err, 'danger');
+            }).finally(function () {
+                addBtn.disabled = false;
+            });
+        }
+
+        function removeAdmin(pubkey, name) {
+            if (!window.confirm('Remove admin ' + (name || shortKey(pubkey)) + '?')) { return; }
+            postAction('remove', pubkey).then(function (res) {
+                if (res.ok && res.body.success) {
+                    setStatus('Removed — applying…', 'success');
+                    loadAdmins();
+                } else {
+                    setStatus(res.body.error || 'Remove failed.', 'danger');
+                }
+            }).catch(function (err) {
+                setStatus('Remove failed: ' + err, 'danger');
+            });
+        }
+
+        addBtn.addEventListener('click', addAdmin);
+        document.addEventListener('DOMContentLoaded', loadAdmins);
+        if (document.readyState !== 'loading') { loadAdmins(); }
+    })();
+    </script>
+
     <div class="row">
         <div class="col-12">
             <h1 class="mb-3">
