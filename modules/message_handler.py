@@ -69,6 +69,16 @@ class MessageHandler:
         # Maximum entries for SNR/RSSI LRU caches
         self._max_signal_cache_size = 1000
 
+        # Dedup window for web-viewer packet_stream capture. A single mesh packet is
+        # often heard via several RF paths (multiple RX_LOG_DATA events); this keeps the
+        # live packet feed from spamming the same packet. Keyed by packet identity
+        # (packet_hash, else raw hex) -> last-capture time.
+        self._web_capture_dedup: OrderedDict[str, float] = OrderedDict()
+        self._web_capture_dedup_window = float(
+            bot.config.get("Bot", "web_capture_dedup_window", fallback="30.0")
+        )
+        self._max_web_capture_dedup = 2000
+
         # Multitest command listener (for collecting paths during listening window)
         self.multitest_listener: Any | None = None
 
@@ -844,6 +854,111 @@ class MessageHandler:
         except Exception as e:
             self.logger.error(f"Error processing advertisement packet: {e}")
 
+    def _should_capture_for_web(self, key: str, now: float | None = None) -> bool:
+        """Return True if this packet identity has not been captured within the dedup window.
+
+        Records the capture time and evicts stale / oversized entries. Falls open (returns
+        True) on any internal error so a dedup bug can never silently drop captures.
+        """
+        try:
+            if not key:
+                return True
+            if now is None:
+                now = time.time()
+            window = self._web_capture_dedup_window
+            dedup = self._web_capture_dedup
+            # Evict entries older than the window (front of the OrderedDict is oldest-touched)
+            cutoff = now - window
+            while dedup:
+                oldest_key = next(iter(dedup))
+                if dedup[oldest_key] < cutoff:
+                    dedup.pop(oldest_key, None)
+                else:
+                    break
+            last = dedup.get(key)
+            if last is not None and (now - last) < window:
+                # Duplicate within the window: refresh recency, signal "already captured"
+                dedup[key] = now
+                dedup.move_to_end(key)
+                return False
+            dedup[key] = now
+            dedup.move_to_end(key)
+            while len(dedup) > self._max_web_capture_dedup:
+                dedup.popitem(last=False)
+            return True
+        except Exception:
+            return True
+
+    def _capture_raw_packet_for_web(self, payload: Any, metadata: dict[str, Any] | None = None) -> None:
+        """Ensure a raw RX_LOG_DATA packet lands in the web-viewer packet_stream.
+
+        Best-effort fallback that captures every received mesh packet as ``type='packet'``,
+        even when it never reached the primary decode/capture path in ``handle_rf_log_data``
+        (e.g. no ``snr`` field, or ``decode_meshcore_packet`` failed). Deduplicated by packet
+        identity so the same packet heard via multiple paths is not re-emitted. Never raises.
+        """
+        try:
+            integ = getattr(self.bot, "web_viewer_integration", None)
+            if not integ or not getattr(integ, "bot_integration", None):
+                return
+            try:
+                raw_hex = payload.get("raw_hex", "") or ""
+            except Exception:
+                raw_hex = ""
+            if not raw_hex:
+                return
+            try:
+                extracted_payload = payload.get("payload", "") or ""
+            except Exception:
+                extracted_payload = ""
+
+            now = time.time()
+            try:
+                decoded = self.decode_meshcore_packet(raw_hex, extracted_payload)
+            except Exception:
+                decoded = None
+
+            packet_hash = None
+            if decoded:
+                packet_data = dict(decoded)
+                payload_type_value = decoded.get("payload_type")
+                if payload_type_value is not None and hasattr(payload_type_value, "value"):
+                    payload_type_value = payload_type_value.value
+                try:
+                    packet_hex_for_hash = extracted_payload if extracted_payload else raw_hex
+                    packet_hash = calculate_packet_hash(
+                        packet_hex_for_hash,
+                        int(payload_type_value) if payload_type_value is not None else None,
+                    )
+                except Exception:
+                    packet_hash = None
+                packet_data["raw_packet_hex"] = extracted_payload if extracted_payload else raw_hex
+            else:
+                # Decode failed — still record the raw bytes so nothing is silently dropped
+                packet_data = {
+                    "raw_packet_hex": extracted_payload if extracted_payload else raw_hex,
+                    "data": extracted_payload if extracted_payload else raw_hex,
+                    "decode_failed": True,
+                }
+
+            # Preserve SNR/RSSI signal context on the captured row when present
+            try:
+                if payload.get("snr") is not None:
+                    packet_data.setdefault("snr", payload.get("snr"))
+                if payload.get("rssi") is not None:
+                    packet_data.setdefault("rssi", payload.get("rssi"))
+            except Exception:
+                pass
+            if packet_hash:
+                packet_data["packet_hash"] = packet_hash
+
+            dedup_key = packet_hash or packet_data.get("raw_packet_hex") or raw_hex
+            if not self._should_capture_for_web(dedup_key, now):
+                return
+            integ.bot_integration.capture_full_packet_data(packet_data)
+        except Exception as e:
+            self.logger.warning(f"Error capturing raw packet for web viewer: {e}")
+
     async def handle_rf_log_data(self, event: Any, metadata: dict[str, Any] | None = None) -> None:
         """Handle RF log data events to cache SNR information and store raw packet data.
 
@@ -862,6 +977,10 @@ class MessageHandler:
             if payload is None:
                 self.logger.warning("RF log data event has no payload")
                 return
+
+            # Tracks whether the primary (rich) capture path below already handed this
+            # packet to the web viewer, so the fallback capture does not duplicate it.
+            captured_for_web = False
 
             # Extract SNR from payload
             if "snr" in payload:
@@ -1140,7 +1259,18 @@ class MessageHandler:
                                 # (header + path_len + path + payload, without RF wrapper)
                                 decoded_packet["raw_packet_hex"] = extracted_payload if extracted_payload else raw_hex
                                 decoded_packet["packet_hash"] = packet_hash
-                                self.bot.web_viewer_integration.bot_integration.capture_full_packet_data(decoded_packet)
+                                # Reaching this point means the packet went through the rich
+                                # capture path; suppress the fallback capture below regardless of
+                                # the dedup outcome. Dedup prevents multi-path repeats from spamming
+                                # the live feed with identical rows.
+                                captured_for_web = True
+                                _web_dedup_key = (
+                                    packet_hash
+                                    or decoded_packet.get("raw_packet_hex")
+                                    or raw_hex
+                                )
+                                if self._should_capture_for_web(_web_dedup_key, current_time):
+                                    self.bot.web_viewer_integration.bot_integration.capture_full_packet_data(decoded_packet)
 
                             # Process ADVERT packets for contact tracking (regardless of path length)
                             if routing_info["payload_type"] == "ADVERT":
@@ -1228,6 +1358,14 @@ class MessageHandler:
 
                     # Clean up old pending messages
                     self.cleanup_old_messages()
+
+            # Fallback capture: guarantee every received mesh packet that carries raw bytes
+            # lands in the web-viewer packet_stream as type='packet', even when the primary
+            # capture above was skipped (no 'snr' field, empty packet prefix, or a decode
+            # failure). Deduplicated so it never duplicates the rich capture, and wrapped so
+            # it can never raise out of the handler.
+            if not captured_for_web:
+                self._capture_raw_packet_for_web(payload, metadata)
 
         except Exception as e:
             self.logger.error(f"Error handling RF log data: {e}")

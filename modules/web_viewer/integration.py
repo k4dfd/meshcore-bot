@@ -290,9 +290,15 @@ class BotIntegration:
                 break
 
     def _flush_write_queue(self) -> None:
-        """Drain all queued rows and insert them in a single batched transaction."""
+        """Drain all queued rows and insert them in a single batched transaction.
+
+        On a successful commit the rows are also pushed live to web-viewer socketio
+        subscribers (best-effort, after the lock is released so network I/O never stalls
+        the drain thread or a producer retry). Only committed rows are emitted.
+        """
         import sqlite3
 
+        committed_rows: Optional[list[tuple[float, str, str]]] = None
         with self._flush_lock:
             if self._write_queue.empty():
                 return
@@ -314,7 +320,8 @@ class BotIntegration:
                             rows,
                         )
                         conn.commit()
-                    return
+                    committed_rows = rows
+                    break
                 except sqlite3.OperationalError as e:
                     if "locked" in str(e).lower() and attempt < max_retries - 1:
                         time.sleep(0.15 * (attempt + 1))
@@ -330,6 +337,75 @@ class BotIntegration:
                     )
                     self._requeue_rows(rows)
                     return
+
+        # DB write committed and flush lock released: push the new rows live to
+        # subscribed browsers. Best-effort — a socketio/HTTP failure must never affect
+        # capture, and this only runs after the rows are safely persisted.
+        if committed_rows:
+            self._emit_live_rows(committed_rows)
+
+    def _emit_live_rows(self, rows: list[tuple[float, str, str]]) -> None:
+        """Push committed packet_stream rows to live web-viewer subscribers (best-effort).
+
+        Mirrors the type -> event mapping the web viewer uses when it backfills a new
+        subscriber in ``handle_subscribe_packets``: ``command`` rows drive the
+        ``command_data`` event, ``packet``/``routing`` rows drive ``packet_data``.
+        ``message`` rows are not pushed live (the backfill query excludes them too).
+        Never raises into the caller.
+        """
+        import json
+
+        for row in rows:
+            try:
+                _timestamp, data_json, row_type = row
+                if row_type == 'command':
+                    stream_type = 'command'
+                elif row_type in ('packet', 'routing'):
+                    stream_type = 'packet'
+                else:
+                    continue
+                data = json.loads(data_json)
+                self._post_stream_data(stream_type, data)
+            except Exception as e:
+                self.bot.logger.debug(f"Error emitting live packet_stream row: {e}")
+
+    def _post_stream_data(self, stream_type: str, data) -> None:
+        """Best-effort HTTP push of one committed row to the running web viewer.
+
+        The web viewer runs as a separate process; its ``/api/stream_data`` endpoint
+        dispatches ``type='command'`` to ``_handle_command_data`` and ``type='packet'``
+        to ``_handle_packet_data``, which ``socketio.emit`` to subscribed clients. This is
+        the same cross-process bridge used by ``send_mesh_edge_update`` /
+        ``send_mesh_node_update`` (host/port config, shared X-Stream-Token, pooled
+        session, circuit breaker). Never raises.
+        """
+        try:
+            if self._should_skip_web_viewer_send():
+                return
+            host = self.bot.config.get('Web_Viewer', 'host', fallback='127.0.0.1')
+            port = self.bot.config.getint('Web_Viewer', 'port', fallback=8080)
+            url = f"http://{host}:{port}/api/stream_data"
+
+            payload = {'type': stream_type, 'data': data}
+            headers = {
+                'X-Stream-Token': self._stream_token,
+                'X-Requested-With': 'BotIntegration',
+            }
+            if self.http_session:
+                try:
+                    self.http_session.post(url, json=payload, timeout=self.edge_post_timeout_sec)
+                    self._record_web_viewer_result(True)
+                except Exception:
+                    self._record_web_viewer_result(False)
+            else:
+                import requests
+                try:
+                    requests.post(url, json=payload, timeout=self.edge_post_timeout_sec, headers=headers)
+                    self._record_web_viewer_result(True)
+                except Exception:
+                    self._record_web_viewer_result(False)
+        except Exception as e:
+            self.bot.logger.debug(f"Error posting live stream data to web viewer: {e}")
 
     def _insert_packet_stream_row(self, data_json: str, row_type: str, log_prefix: str = "packet data"):
         """Queue one row for batched insertion into packet_stream by the drain thread."""
