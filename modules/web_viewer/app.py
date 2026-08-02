@@ -90,6 +90,173 @@ def _strip_ansi_codes(text: str) -> str:
     return _ANSI_ESCAPE_RE.sub("", text)
 
 
+# ── Data-driven config editor: schema parser ────────────────────────────────
+# Parses config.ini.example into an ordered, typed schema used by the
+# /config/editor UI and by /api/config/set for server-side validation. Driven
+# entirely by the example file so every section/setting is covered automatically.
+
+_CFG_SECRET_RE = re.compile(r'(password|token|secret|api[_-]?key|private[_-]?key)', re.IGNORECASE)
+_CFG_RISKY_TOKENS = ('host', 'port', 'serial', 'baud', 'path', 'key',
+                     'password', 'token', 'transport')
+_CFG_ACTIVE_RE = re.compile(r'^([A-Za-z_][\w.\-]*)\s*=(.*)$')
+_CFG_COMMENT_KEY_RE = re.compile(r'^#\s*([a-z_][\w.\-]*)\s*=(.*)$')
+_CFG_SECTION_RE = re.compile(r'^\[([^\]]+)\]\s*$')
+_CFG_OPT_LABELS = {'recommended', 'options', 'option', 'note', 'notes', 'example',
+                   'examples', 'default', 'defaults', 'format', 'warning', 'optional',
+                   'required', 'available', 'e.g', 'eg', 'i.e', 'ie', 'tip', 'see'}
+
+
+def _cfg_is_secret(key):
+    return bool(_CFG_SECRET_RE.search(key))
+
+
+def _cfg_is_risky(section, key):
+    if section == 'Connection':
+        return True
+    kl = key.lower()
+    return any(tok in kl for tok in _CFG_RISKY_TOKENS)
+
+
+def _cfg_dedup(toks):
+    seen, out = set(), []
+    for t in toks:
+        if t and t.lower() not in seen:
+            seen.add(t.lower())
+            out.append(t)
+    return out
+
+
+def _cfg_extract_options(value, help_text):
+    """Best-effort enumeration of discrete option values from help text.
+
+    Every form requires the current/default value to be one of the extracted
+    tokens — a strong signal that the token set is a real enum (not prose, a
+    URL, a path, or an example). Without a default we cannot confirm an enum,
+    so we fall back to a free-text field (still editable).
+    """
+    if not help_text:
+        return []
+    default = (value or '').strip().lower()
+    if not default:
+        return []
+
+    # Form A — inline list after a label colon: "Log level: DEBUG, INFO, ERROR"
+    #          also handles " x, y, or z" / " x and y".
+    for line in help_text.split('\n'):
+        if ':' not in line:
+            continue
+        after = line.split(':', 1)[1]
+        after = re.sub(r'\b(?:or|and)\b', ',', after, flags=re.IGNORECASE)
+        toks = [t.strip() for t in after.split(',')]
+        toks = [t for t in toks if re.fullmatch(r'[A-Za-z0-9_]+', t or '')]
+        if len(toks) >= 2 and default in [t.lower() for t in toks]:
+            return _cfg_dedup(toks)
+
+    # Form B — bullet/definition keys: lines like "- batched: ..." / "DEBUG: ..."
+    bullet = []
+    for line in help_text.split('\n'):
+        m = re.match(r'^\s*[-*]?\s*([A-Za-z0-9_]+)\s*:\s+\S', line)
+        if m and m.group(1).lower() not in _CFG_OPT_LABELS:
+            bullet.append(m.group(1))
+    bullet = _cfg_dedup(bullet)
+    if len(bullet) >= 2 and default in [t.lower() for t in bullet]:
+        return bullet
+
+    # Form C — slash-separated enum: "0/1/2" / "immediate/batched" (not true/false)
+    for m in re.finditer(r'\b([A-Za-z0-9]+(?:/[A-Za-z0-9]+)+)\b', help_text):
+        parts = m.group(1).split('/')
+        if len(parts) < 2 or all(len(p) > 15 for p in parts):
+            continue
+        if [p.lower() for p in parts] == ['true', 'false']:
+            continue
+        if default in [p.lower() for p in parts]:
+            return parts
+    return []
+
+
+def _cfg_infer_type_and_options(value, help_text):
+    """Return (type, options[]) with type in bool/int/select/text."""
+    v = (value or '').strip()
+    if v.lower() in ('true', 'false'):
+        return 'bool', []
+    if re.fullmatch(r'-?\d+', v):
+        return 'int', []
+    options = _cfg_extract_options(v, help_text)
+    if options:
+        return 'select', options
+    return 'text', []
+
+
+def parse_config_schema(example_text, current_config=None):
+    """Parse config.ini.example text into an ordered, typed schema.
+
+    Returns [{'name', 'settings': [{key, value, default, help, type, options,
+    risky, secret, commented}]}] preserving file order. ``current_config`` (a
+    ConfigParser) supplies live values; the example value is the fallback/default.
+    Values are NOT redacted here — callers redact for display.
+    """
+    sections = []
+    cur = None
+    seen_keys = None
+    pending = []
+
+    def add_setting(key, raw_value, commented):
+        default = (raw_value or '').strip()
+        help_text = '\n'.join(pending).strip()
+        stype, options = _cfg_infer_type_and_options(default, help_text)
+        value = default
+        if (current_config is not None
+                and current_config.has_section(cur['name'])
+                and current_config.has_option(cur['name'], key)):
+            value = (current_config.get(cur['name'], key) or '').strip()
+        cur['settings'].append({
+            'key': key,
+            'value': value,
+            'default': default,
+            'help': help_text,
+            'type': stype,
+            'options': options,
+            'risky': _cfg_is_risky(cur['name'], key),
+            'secret': _cfg_is_secret(key),
+            'commented': commented,
+        })
+        seen_keys.add(key.lower())
+
+    for raw in example_text.split('\n'):
+        stripped = raw.strip()
+        if stripped == '':
+            pending = []
+            continue
+        m_sec = _CFG_SECTION_RE.match(stripped)
+        if m_sec:
+            cur = {'name': m_sec.group(1), 'settings': []}
+            sections.append(cur)
+            seen_keys = set()
+            pending = []
+            continue
+        if cur is None:
+            continue
+        if not stripped.startswith('#'):
+            m = _CFG_ACTIVE_RE.match(stripped)
+            if m and m.group(1).lower() not in seen_keys:
+                add_setting(m.group(1), m.group(2), False)
+            pending = []
+            continue
+        m_ck = _CFG_COMMENT_KEY_RE.match(stripped)
+        if m_ck:
+            if m_ck.group(1).lower() not in seen_keys:
+                add_setting(m_ck.group(1), m_ck.group(2), True)
+            pending = []
+            continue
+        pending.append(stripped[1:].strip())
+    return sections
+
+
+def _cfg_example_path(config_path):
+    """Locate config.ini.example beside the active config.ini."""
+    return os.path.join(os.path.dirname(os.path.abspath(config_path)), 'config.ini.example')
+
+
 from modules.config_snapshot import config_to_redacted_sections
 from modules.feed_manager import FeedManager
 from modules.repeater_manager import RepeaterManager
@@ -1607,6 +1774,177 @@ class BotDataViewer:
                 self.logger.warning("admin_pubkeys saved but reload queue failed: %s", exc)
             self.logger.info("Admin ACL %s %s… — %d admin(s) now", action, pubkey[:12], len(keys))
             return jsonify({'success': True, 'action': action, 'count': len(keys), 'reload_queued': reload_queued})
+
+        # ── Data-driven configuration editor ─────────────────────────────────
+
+        def _load_config_schema():
+            """Parse config.ini.example into the typed schema (live values merged)."""
+            example_path = _cfg_example_path(self.config_path)
+            with open(example_path, encoding='utf-8') as fh:
+                return parse_config_schema(fh.read(), self.config)
+
+        @self.app.route('/config/editor')
+        def config_editor():
+            """Render the data-driven configuration editor page."""
+            return render_template('config_editor.html')
+
+        @self.app.route('/api/config/schema')
+        def api_config_schema():
+            """Return the ordered, typed config schema parsed from config.ini.example.
+
+            Secret VALUES are redacted (a placeholder is returned) but the keys are
+            still listed and remain settable via /api/config/set.
+            """
+            try:
+                sections = _load_config_schema()
+            except OSError as exc:
+                self.logger.error("config schema: could not read config.ini.example: %s", exc)
+                return jsonify({'error': 'config.ini.example not found or unreadable'}), 500
+            redacted = []
+            for sec in sections:
+                out_settings = []
+                for st in sec['settings']:
+                    item = dict(st)
+                    if st['secret'] and (item['value'] or item['default']):
+                        item['value'] = ''
+                        item['default'] = ''
+                        item['redacted'] = True
+                    else:
+                        item['redacted'] = False
+                    out_settings.append(item)
+                redacted.append({'name': sec['name'], 'settings': out_settings})
+            total = sum(len(s['settings']) for s in redacted)
+            return jsonify({'sections': redacted, 'section_count': len(redacted), 'setting_count': total})
+
+        @self.app.route('/api/config/set', methods=['POST'])
+        def api_config_set():
+            """Set a single config.ini value with a comment-preserving line edit.
+
+            Body: {"section","key","value"}. The section+key must exist in the
+            example schema; the value is coerced/validated against the inferred
+            type. Persists via a targeted line write (all comments/formatting are
+            preserved), updates the in-memory config, and queues a live reload.
+            """
+            data = request.get_json(silent=True) or {}
+            section = str(data.get('section', '')).strip()
+            key = str(data.get('key', '')).strip()
+            if not section or not key:
+                return jsonify({'success': False, 'error': 'section and key are required'}), 400
+            raw_value = data.get('value', '')
+            if isinstance(raw_value, bool):
+                raw_value = 'true' if raw_value else 'false'
+            value = str(raw_value)
+
+            # 1) Validate section+key exist in the example-driven schema.
+            try:
+                schema = _load_config_schema()
+            except OSError as exc:
+                self.logger.error("config set: could not read config.ini.example: %s", exc)
+                return jsonify({'success': False, 'error': 'config.ini.example not found or unreadable'}), 500
+            spec = None
+            for sec in schema:
+                if sec['name'] == section:
+                    for st in sec['settings']:
+                        if st['key'] == key:
+                            spec = st
+                            break
+                    break
+            if spec is None:
+                return jsonify({'success': False, 'error': f'Unknown setting [{section}] {key}'}), 400
+
+            # 2) Coerce/validate by inferred type. Reject anything that would
+            #    corrupt the single-line ini format.
+            if '\n' in value or '\r' in value:
+                return jsonify({'success': False, 'error': 'Value must not contain line breaks'}), 400
+            stype = spec['type']
+            if stype == 'bool':
+                lv = value.strip().lower()
+                if lv not in ('true', 'false'):
+                    return jsonify({'success': False, 'error': 'Value must be true or false'}), 400
+                value = lv
+            elif stype == 'int':
+                if not re.fullmatch(r'-?\d+', value.strip()):
+                    return jsonify({'success': False, 'error': 'Value must be an integer'}), 400
+                value = value.strip()
+            elif stype == 'select':
+                match = next((o for o in spec['options'] if o.lower() == value.strip().lower()), None)
+                if match is None:
+                    return jsonify({'success': False, 'error': 'Value must be one of: ' + ', '.join(spec['options'])}), 400
+                value = match
+            else:
+                value = value.strip()
+
+            # 3) Targeted, comment-preserving write to config.ini. Mirrors the
+            #    Admin_ACL endpoint: replace the `key =` line inside [section]
+            #    (uncommenting it if needed); append the key or whole section if
+            #    absent; atomic os.replace.
+            try:
+                with open(self.config_path, encoding='utf-8') as fh:
+                    src_lines = fh.readlines()
+            except OSError as exc:
+                self.logger.error("config set: could not read config.ini: %s", exc)
+                return jsonify({'success': False, 'error': 'Could not read config.ini — check file permissions'}), 500
+
+            sec_re = re.compile(r'^\s*\[([^\]]+)\]\s*$')
+            key_re = re.compile(r'^\s*#?\s*' + re.escape(key) + r'\s*=', re.IGNORECASE)
+            new_line = f'{key} = {value}\n'
+            new_lines = []
+            in_section = False
+            section_seen = False
+            wrote = False
+            for ln in src_lines:
+                m = sec_re.match(ln)
+                if m:
+                    if in_section and not wrote:
+                        new_lines.append(new_line)
+                        wrote = True
+                    in_section = (m.group(1) == section)
+                    if in_section:
+                        section_seen = True
+                    new_lines.append(ln)
+                    continue
+                if in_section and not wrote and key_re.match(ln):
+                    new_lines.append(new_line)
+                    wrote = True
+                    continue
+                new_lines.append(ln)
+            if in_section and not wrote:
+                new_lines.append(new_line)
+                wrote = True
+            if not wrote:
+                if not section_seen:
+                    if new_lines and new_lines[-1].strip() != '':
+                        new_lines.append('\n')
+                    new_lines.append(f'[{section}]\n')
+                new_lines.append(new_line)
+                wrote = True
+
+            try:
+                tmp = self.config_path + '.tmp'
+                with open(tmp, 'w', encoding='utf-8') as fh:
+                    fh.writelines(new_lines)
+                os.replace(tmp, self.config_path)
+            except OSError as exc:
+                self.logger.error("config set: could not write config.ini: %s", exc)
+                return jsonify({'success': False, 'error': 'Could not write config.ini — check file permissions'}), 500
+
+            # 4) Keep the in-memory config in sync.
+            if not self.config.has_section(section):
+                self.config.add_section(section)
+            self.config.set(section, key, value)
+
+            # 5) Queue a live reload (best-effort — the write already persisted).
+            reload_queued = False
+            try:
+                with self.db_manager.connection() as conn:
+                    conn.execute("INSERT INTO channel_operations (operation_type, status) VALUES ('reload_config', 'pending')")
+                    conn.commit()
+                reload_queued = True
+            except Exception as exc:  # noqa: BLE001 - saved to disk regardless; reload is best-effort
+                self.logger.warning("config set: saved but reload queue failed: %s", exc)
+            disp = '***' if spec['secret'] else value
+            self.logger.info("Config updated via editor: [%s] %s = %s", section, key, disp)
+            return jsonify({'success': True, 'section': section, 'key': key, 'reload_queued': reload_queued})
 
         # ── Maintenance config ───────────────────────────────────────────────
 
