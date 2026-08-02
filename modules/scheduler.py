@@ -954,7 +954,8 @@ class MessageScheduler:
                       AND operation_type IN (
                           'radio_reboot', 'radio_connect', 'radio_disconnect',
                           'firmware_read', 'firmware_write',
-                          'radio_params_read', 'radio_params_write'
+                          'radio_params_read', 'radio_params_write',
+                          'reload_config'
                       )
                     ORDER BY created_at ASC
                     LIMIT 1
@@ -986,6 +987,9 @@ class MessageScheduler:
                 elif op_type == 'radio_params_write':
                     payload = json.loads(op['payload_data'] or '{}')
                     success, result_payload = await self._radio_params_write_op(payload)
+                elif op_type == 'reload_config':
+                    ok, _msg = self.bot.reload_config()
+                    success = bool(ok)
                 else:
                     success = False
 
