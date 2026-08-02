@@ -32,6 +32,10 @@ class TestCommand(BaseCommand):
     keywords = ['test', 't']
     description = "Responds to 'test' or 't' with connection info"
     category = "basic"
+    # We build a personalized, multi-part reply in execute() (greeting + metrics +
+    # distance), so the keyword-matcher must defer to execute() rather than
+    # pre-rendering/sending the response_format itself.
+    handles_own_response = True
 
     # Documentation
     short_description = "Get test response with connection info"

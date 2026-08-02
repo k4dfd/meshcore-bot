@@ -746,12 +746,12 @@ class CommandManager:
 
                 # Get response format and generate response
                 response_format = command.get_response_format()
-                if response_format:
+                if response_format and not getattr(command, 'handles_own_response', False):
                     response = command.format_response(message, response_format)
                     matches.append((command_name, response))
                 else:
-                    # For commands without response format, they handle their own response
-                    # We'll mark them as matched but let execute_commands handle the actual execution
+                    # No response format, OR the command handles its own response in
+                    # execute() (handles_own_response) — defer to execute_commands.
                     matches.append((command_name, None))
 
         # Check remaining keywords that don't have plugins
@@ -1703,7 +1703,7 @@ class CommandManager:
             if command.should_execute(message):
                 # Only execute commands that don't have a response format (they handle their own responses)
                 response_format = command.get_response_format()
-                if response_format is not None:
+                if response_format is not None and not getattr(command, 'handles_own_response', False):
                     # This command was already handled by keyword matching
                     continue
 

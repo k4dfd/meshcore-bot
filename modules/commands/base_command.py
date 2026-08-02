@@ -30,6 +30,11 @@ class BaseCommand(ABC):
     requires_internet: bool = False  # Set to True if command needs internet access
     cooldown_seconds: int = 0
     category: str = "general"
+    # When True, the command builds/sends its OWN response in execute() (e.g.
+    # personalized, multi-part), so the keyword-matcher must NOT pre-render its
+    # response_format and send it directly — it defers to execute() instead. The
+    # command may still expose a response_format (used internally by execute()).
+    handles_own_response: bool = False
 
     # Documentation fields - to be overridden by subclasses for website generation
     short_description: str = ""  # Brief description for website (without usage syntax)
