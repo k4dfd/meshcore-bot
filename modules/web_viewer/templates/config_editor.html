@@ -1,0 +1,370 @@
+{% extends "base.html" %}
+
+{% block title %}Configuration Editor · MeshCore Bot{% endblock %}
+
+{% block extra_css %}
+<style>
+    .cfg-toolbar {
+        position: sticky;
+        top: 0;
+        z-index: 5;
+        background-color: var(--bg-color);
+        padding: 0.75rem 0;
+        border-bottom: 1px solid var(--border-color);
+        margin-bottom: 1rem;
+    }
+    .cfg-section-btn {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        width: 100%;
+        text-align: left;
+        gap: 0.75rem;
+    }
+    .cfg-row {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto;
+        gap: 0.75rem 1rem;
+        align-items: start;
+        padding: 0.7rem 0;
+        border-top: 1px solid var(--border-color);
+    }
+    .cfg-row:first-child { border-top: none; }
+    .cfg-key {
+        font-family: 'Courier New', monospace;
+        font-weight: 600;
+        word-break: break-all;
+    }
+    .cfg-key-meta { display: flex; flex-wrap: wrap; gap: 0.3rem; align-items: center; margin-top: 0.25rem; }
+    .cfg-control { display: flex; flex-direction: column; gap: 0.35rem; }
+    .cfg-actions { display: flex; align-items: center; gap: 0.4rem; white-space: nowrap; }
+    .cfg-status { font-size: 0.8rem; min-height: 1rem; }
+    .cfg-status.ok { color: #198754; }
+    .cfg-status.err { color: #dc3545; }
+    .cfg-help {
+        grid-column: 1 / -1;
+        background-color: var(--bg-secondary);
+        border: 1px solid var(--border-color);
+        border-radius: 6px;
+        padding: 0.6rem 0.8rem;
+        font-size: 0.85rem;
+        white-space: pre-wrap;
+    }
+    .cfg-help .cfg-help-meta { color: var(--text-muted); margin-top: 0.4rem; font-family: 'Courier New', monospace; font-size: 0.8rem; }
+    .cfg-help-btn { line-height: 1; }
+    @media (max-width: 768px) {
+        .cfg-row { grid-template-columns: 1fr; }
+        .cfg-actions { justify-content: flex-start; }
+    }
+    mark.cfg-hit { padding: 0; background-color: #ffe08a; color: inherit; }
+    [data-theme="dark"] mark.cfg-hit { background-color: #7a5c00; color: #fff; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-2">
+    <div>
+        <h3 class="mb-0"><i class="fas fa-sliders-h me-2"></i>Configuration Editor</h3>
+        <div class="text-muted small">Every setting in <code>config.ini</code>, grouped by section. Changes are written to disk and applied live.</div>
+    </div>
+    <div class="text-muted small" id="cfg-summary"></div>
+</div>
+
+<div class="alert alert-warning py-2 small" role="alert">
+    <i class="fas fa-triangle-exclamation me-1"></i>
+    Editing configuration changes live bot behaviour. Sensitive settings (marked <span class="badge bg-warning text-dark">risky</span>) prompt for confirmation before saving.
+</div>
+
+<div class="cfg-toolbar">
+    <div class="row g-2 align-items-center">
+        <div class="col-md-8">
+            <div class="input-group input-group-sm">
+                <span class="input-group-text"><i class="fas fa-search"></i></span>
+                <input type="text" id="cfg-search" class="form-control" placeholder="Filter settings by section or key…" autocomplete="off">
+                <button class="btn btn-outline-secondary" id="cfg-clear" type="button" title="Clear filter"><i class="fas fa-times"></i></button>
+            </div>
+        </div>
+        <div class="col-md-4 d-flex gap-2 justify-content-md-end">
+            <button class="btn btn-outline-secondary btn-sm" id="cfg-expand" type="button"><i class="fas fa-angles-down me-1"></i>Expand all</button>
+            <button class="btn btn-outline-secondary btn-sm" id="cfg-collapse" type="button"><i class="fas fa-angles-up me-1"></i>Collapse all</button>
+        </div>
+    </div>
+</div>
+
+<div id="cfg-loading" class="loading"><i class="fas fa-spinner fa-spin me-2"></i>Loading configuration schema…</div>
+<div id="cfg-error" class="error d-none"></div>
+<div id="cfg-sections"></div>
+<div id="cfg-noresults" class="text-muted text-center py-4 d-none">No settings match your filter.</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function () {
+    'use strict';
+
+    var sectionsEl = document.getElementById('cfg-sections');
+    var loadingEl = document.getElementById('cfg-loading');
+    var errorEl = document.getElementById('cfg-error');
+    var summaryEl = document.getElementById('cfg-summary');
+    var searchEl = document.getElementById('cfg-search');
+    var noResultsEl = document.getElementById('cfg-noresults');
+
+    var cardIndex = [];   // [{card, collapse, name, rows:[{row, key, keyEl}]}]
+
+    function showError(msg) {
+        loadingEl.classList.add('d-none');
+        errorEl.textContent = msg;
+        errorEl.classList.remove('d-none');
+    }
+
+    // Safe element builder — text always via textContent, never innerHTML.
+    function el(tag, opts) {
+        var node = document.createElement(tag);
+        opts = opts || {};
+        if (opts.cls) node.className = opts.cls;
+        if (opts.text != null) node.textContent = opts.text;
+        if (opts.attrs) Object.keys(opts.attrs).forEach(function (k) { node.setAttribute(k, opts.attrs[k]); });
+        return node;
+    }
+
+    function badge(text, cls, title) {
+        var b = el('span', { cls: 'badge ' + cls, text: text });
+        if (title) b.setAttribute('title', title);
+        return b;
+    }
+
+    function buildControl(setting) {
+        var value = setting.value != null ? String(setting.value) : '';
+        var input;
+        if (setting.type === 'bool') {
+            var wrap = el('div', { cls: 'form-check form-switch' });
+            input = el('input', { cls: 'form-check-input', attrs: { type: 'checkbox', role: 'switch' } });
+            if (value.toLowerCase() === 'true') input.checked = true;
+            wrap.appendChild(input);
+            wrap._getValue = function () { return input.checked ? 'true' : 'false'; };
+            wrap._input = input;
+            return wrap;
+        }
+        if (setting.type === 'int') {
+            input = el('input', { cls: 'form-control form-control-sm', attrs: { type: 'number', step: '1' } });
+            input.value = value;
+            input._getValue = function () { return input.value.trim(); };
+            return input;
+        }
+        if (setting.type === 'select') {
+            input = el('select', { cls: 'form-select form-select-sm' });
+            var opts = setting.options.slice();
+            // Preserve an out-of-list current value so we never silently drop it.
+            if (value && opts.map(function (o) { return o.toLowerCase(); }).indexOf(value.toLowerCase()) === -1) {
+                opts.unshift(value);
+            }
+            opts.forEach(function (o) {
+                var optEl = el('option', { text: o, attrs: { value: o } });
+                if (o.toLowerCase() === value.toLowerCase()) optEl.selected = true;
+                input.appendChild(optEl);
+            });
+            input._getValue = function () { return input.value; };
+            return input;
+        }
+        // text / secret
+        var type = setting.secret ? 'password' : 'text';
+        input = el('input', { cls: 'form-control form-control-sm', attrs: { type: type, autocomplete: 'off' } });
+        if (setting.secret) {
+            input.setAttribute('placeholder', setting.redacted ? '•••••• (set — type to replace)' : 'not set — type to set');
+        } else {
+            input.value = value;
+        }
+        input._getValue = function () { return input.value; };
+        input._secret = setting.secret;
+        return input;
+    }
+
+    function buildRow(sectionName, setting) {
+        var row = el('div', { cls: 'cfg-row' });
+
+        // Column 1: key + metadata + help toggle
+        var left = el('div');
+        var keyLine = el('div', { cls: 'd-flex align-items-center gap-2' });
+        var keyEl = el('span', { cls: 'cfg-key', text: setting.key });
+        keyLine.appendChild(keyEl);
+        var helpBtn = el('button', { cls: 'btn btn-sm btn-outline-info cfg-help-btn', attrs: { type: 'button', 'aria-label': 'Help for ' + setting.key, title: 'What does this do?' } });
+        helpBtn.appendChild(el('i', { cls: 'fas fa-question' }));
+        keyLine.appendChild(helpBtn);
+        left.appendChild(keyLine);
+
+        var meta = el('div', { cls: 'cfg-key-meta' });
+        meta.appendChild(badge(setting.type, 'bg-secondary'));
+        if (setting.commented) meta.appendChild(badge('optional', 'bg-info text-dark', 'Not set in the example by default'));
+        if (setting.risky) meta.appendChild(badge('risky', 'bg-warning text-dark', 'Changing this can disrupt connectivity or bot behaviour'));
+        if (setting.secret) meta.appendChild(badge('secret', 'bg-dark', 'Value is hidden; type a new value to change it'));
+        left.appendChild(meta);
+        row.appendChild(left);
+
+        // Column 2: control
+        var controlWrap = el('div', { cls: 'cfg-control' });
+        var control = buildControl(setting);
+        controlWrap.appendChild(control);
+        var status = el('div', { cls: 'cfg-status' });
+        controlWrap.appendChild(status);
+        row.appendChild(controlWrap);
+
+        // Column 3: actions
+        var actions = el('div', { cls: 'cfg-actions' });
+        var saveBtn = el('button', { cls: 'btn btn-sm btn-primary', attrs: { type: 'button' }, text: 'Save' });
+        actions.appendChild(saveBtn);
+        row.appendChild(actions);
+
+        // Help panel (collapsible; text via textContent only)
+        var help = el('div', { cls: 'cfg-help d-none' });
+        help.textContent = setting.help && setting.help.length ? setting.help : 'No description available for this setting.';
+        var metaLine = el('div', { cls: 'cfg-help-meta' });
+        var metaBits = [];
+        if (!setting.secret) metaBits.push('Default: ' + (setting.default !== '' ? setting.default : '(empty)'));
+        if (setting.type === 'select') metaBits.push('Options: ' + setting.options.join(', '));
+        metaLine.textContent = metaBits.join('   ·   ');
+        if (metaBits.length) help.appendChild(metaLine);
+        row.appendChild(help);
+
+        helpBtn.addEventListener('click', function () { help.classList.toggle('d-none'); });
+
+        saveBtn.addEventListener('click', function () {
+            saveSetting(sectionName, setting, control, saveBtn, status);
+        });
+
+        return { row: row, key: setting.key, keyEl: keyEl };
+    }
+
+    function saveSetting(sectionName, setting, control, saveBtn, status) {
+        var getVal = control._getValue || function () { return control.value; };
+        var value = getVal();
+
+        if (setting.secret && (control._secret) && value === '') {
+            status.className = 'cfg-status err';
+            status.textContent = 'Enter a new value to change this secret.';
+            return;
+        }
+        if (setting.risky) {
+            var ok = window.confirm('“' + setting.key + '” in [' + sectionName + '] is a sensitive setting.\n\n' +
+                'Changing it can disrupt the radio connection or bot behaviour and takes effect live. Continue?');
+            if (!ok) return;
+        }
+
+        saveBtn.disabled = true;
+        status.className = 'cfg-status';
+        status.textContent = 'Saving…';
+
+        fetch('/api/config/set', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            body: JSON.stringify({ section: sectionName, key: setting.key, value: value })
+        })
+        .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+        .then(function (res) {
+            saveBtn.disabled = false;
+            if (res.ok && res.data.success) {
+                status.className = 'cfg-status ok';
+                status.textContent = res.data.reload_queued ? 'Saved — applying…' : 'Saved (reload not queued).';
+            } else {
+                status.className = 'cfg-status err';
+                status.textContent = (res.data && res.data.error) ? res.data.error : 'Save failed.';
+            }
+        })
+        .catch(function () {
+            saveBtn.disabled = false;
+            status.className = 'cfg-status err';
+            status.textContent = 'Network error — could not reach the server.';
+        });
+    }
+
+    function buildSection(section, idx) {
+        var card = el('div', { cls: 'card mb-2' });
+        var collapseId = 'cfg-sec-' + idx;
+
+        var header = el('div', { cls: 'card-header p-0' });
+        var btn = el('button', {
+            cls: 'btn cfg-section-btn p-3 collapsed',
+            attrs: { type: 'button', 'data-bs-toggle': 'collapse', 'data-bs-target': '#' + collapseId, 'aria-expanded': 'false', 'aria-controls': collapseId }
+        });
+        var titleWrap = el('span');
+        titleWrap.appendChild(el('i', { cls: 'fas fa-folder me-2 text-muted' }));
+        titleWrap.appendChild(el('span', { cls: 'fw-bold', text: '[' + section.name + ']' }));
+        btn.appendChild(titleWrap);
+        var right = el('span', { cls: 'd-flex align-items-center gap-2' });
+        right.appendChild(badge(section.settings.length + ' setting' + (section.settings.length === 1 ? '' : 's'), 'bg-secondary'));
+        right.appendChild(el('i', { cls: 'fas fa-chevron-down text-muted' }));
+        btn.appendChild(right);
+        header.appendChild(btn);
+        card.appendChild(header);
+
+        var collapse = el('div', { cls: 'collapse', attrs: { id: collapseId } });
+        var body = el('div', { cls: 'card-body' });
+        var rows = [];
+        if (!section.settings.length) {
+            body.appendChild(el('div', { cls: 'text-muted small', text: 'This section is documentation-only (no editable key/value settings).' }));
+        }
+        section.settings.forEach(function (setting) {
+            var built = buildRow(section.name, setting);
+            body.appendChild(built.row);
+            rows.push(built);
+        });
+        collapse.appendChild(body);
+        card.appendChild(collapse);
+
+        cardIndex.push({ card: card, collapse: collapse, name: section.name.toLowerCase(), rows: rows });
+        return card;
+    }
+
+    function applyFilter() {
+        var q = searchEl.value.trim().toLowerCase();
+        var anyVisible = false;
+        cardIndex.forEach(function (entry) {
+            var sectionMatch = entry.name.indexOf(q) !== -1;
+            var visibleRows = 0;
+            entry.rows.forEach(function (r) {
+                var match = q === '' || sectionMatch || r.key.toLowerCase().indexOf(q) !== -1;
+                r.row.classList.toggle('d-none', !match);
+                if (match) visibleRows++;
+            });
+            var showCard = q === '' || sectionMatch || visibleRows > 0;
+            entry.card.classList.toggle('d-none', !showCard);
+            if (showCard) anyVisible = true;
+            // Auto-expand sections with matches while filtering.
+            if (q !== '' && showCard) {
+                entry.collapse.classList.add('show');
+            }
+        });
+        noResultsEl.classList.toggle('d-none', anyVisible);
+    }
+
+    function setAll(show) {
+        cardIndex.forEach(function (entry) { entry.collapse.classList.toggle('show', show); });
+    }
+
+    function render(data) {
+        loadingEl.classList.add('d-none');
+        summaryEl.textContent = data.section_count + ' sections · ' + data.setting_count + ' settings';
+        var frag = document.createDocumentFragment();
+        data.sections.forEach(function (section, idx) { frag.appendChild(buildSection(section, idx)); });
+        sectionsEl.appendChild(frag);
+    }
+
+    searchEl.addEventListener('input', applyFilter);
+    document.getElementById('cfg-clear').addEventListener('click', function () { searchEl.value = ''; applyFilter(); searchEl.focus(); });
+    document.getElementById('cfg-expand').addEventListener('click', function () { setAll(true); });
+    document.getElementById('cfg-collapse').addEventListener('click', function () { setAll(false); });
+
+    fetch('/api/config/schema')
+        .then(function (r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+        })
+        .then(function (data) {
+            if (!data.sections) throw new Error('malformed schema');
+            render(data);
+        })
+        .catch(function (e) {
+            showError('Could not load configuration schema: ' + e.message);
+        });
+})();
+</script>
+{% endblock %}
