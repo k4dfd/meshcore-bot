@@ -1025,6 +1025,26 @@ class CommandManager:
                         break
 
             if not contact:
+                # SWVAMESH durable fix: the meshcore lib's contact cache is a
+                # startup snapshot, so a DM from a contact learned afterwards
+                # misses. Refresh the cache once from the device and retry, so
+                # any new contact resolves without a bot restart.
+                try:
+                    from meshcore_cli.meshcore_cli import next_cmd
+                    await next_cmd(self.bot.meshcore, ["contacts"])
+                    _rk = (recipient_id or "").strip()
+                    for _cd in (self.bot.meshcore.contacts or {}).values():
+                        _pk = (_cd.get("public_key", "") or "").strip()
+                        if _pk and (_pk == _rk or _pk.startswith(_rk)):
+                            contact = _cd
+                            lookup_type = "pubkey_prefix_after_refresh"
+                            self.logger.info(
+                                "Resolved DM recipient after contact-cache refresh"
+                            )
+                            break
+                except Exception as _e:  # noqa: BLE001 - never break DM handling
+                    self.logger.warning("DM contact-refresh retry failed: %s", _e)
+            if not contact:
                 self.logger.error(
                     "Contact not found for DM recipient identifier: %s",
                     sanitize_name(recipient_id),
