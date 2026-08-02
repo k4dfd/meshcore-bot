@@ -109,3 +109,55 @@ def test_phrase_full_not_echoed_in_compact():
     # "test full extra" → mode stripped, phrase "extra" remains
     fields = cmd._assemble_fields(mock_message(content="test full extra", snr=5, rssi=-100))
     assert fields["phrase"] == "extra"
+
+
+def test_snr_missing_is_dash_consistent_with_rssi():
+    cmd = _cmd()
+    out = cmd.format_response(
+        mock_message(content="test", sender_id="N", snr=None, rssi=None, hops=0),
+        cmd.DEFAULT_FORMAT,
+    )
+    assert "SNR —dB" in out and "RSSI —dBm" in out  # consistent honest-empty token
+
+
+def test_extract_phrase_single_source():
+    cmd = _cmd()
+    assert cmd._extract_phrase("test") == ""
+    assert cmd._extract_phrase("t") == ""
+    assert cmd._extract_phrase("!test") == ""
+    assert cmd._extract_phrase("test hello") == "hello"
+    assert cmd._extract_phrase("t full") == "full"
+    assert cmd._extract_phrase("hello") is None      # not a test command
+    assert cmd._extract_phrase("testing") is None     # not the keyword
+    # matches_keyword is derived from it
+    assert cmd.matches_keyword(mock_message(content="test x")) is True
+    assert cmd.matches_keyword(mock_message(content="nope")) is False
+
+
+def test_find_contact_prefix_direction():
+    cmd = _cmd()
+    full = "ab" * 32  # 64-hex full key
+    cmd.bot.meshcore.contacts = {"c": {"public_key": full}}
+    assert cmd._find_contact(full) is not None            # exact
+    assert cmd._find_contact(full[:12]) is not None        # our value is a prefix of stored full key
+    assert cmd._find_contact("ff" * 32) is None            # unrelated full key -> no match
+
+
+def test_clip_to_budget_truncates_utf8_safely():
+    cmd = _cmd()
+    assert cmd._clip_to_budget("short", 100) == "short"
+    long = "REP-VERYLONGNAME (Somewhere, VA) > NODE (Town, NC)" * 5
+    out = cmd._clip_to_budget(long, 40)
+    assert len(out.encode("utf-8")) <= 40
+    assert out.endswith("…")
+
+
+def test_full_report_lines_within_budget_even_with_long_path(monkeypatch):
+    cmd = _cmd()
+    # Force a very long named path; report must budget every line.
+    monkeypatch.setattr(cmd, "_path_named", lambda message, include_city=True: "NODE-A (City, VA) > NODE-B (City, VA) > NODE-C (City, VA) > NODE-D (City, VA) > NODE-E (City, VA)")
+    msg = mock_message(content="test full", sender_id="YOURNODE", snr=6.0, rssi=-95, hops=4, is_dm=True)
+    budget = cmd.get_max_message_length(msg)
+    lines = cmd._build_full_report(msg, cmd._assemble_fields(msg))
+    for ln in lines:
+        assert len(ln.encode("utf-8")) <= budget, f"line over budget: {ln!r}"

@@ -1411,8 +1411,11 @@ bot_city_label =
 # Pull the sender node's telemetry (battery V / temp) into the reply. Bounded:
 # if the node doesn't answer within telemetry_timeout_seconds the reply still
 # returns with "—". Repeaters require admin login; some nodes disable telemetry.
+# NOTE: telemetry is pulled on every default `test`, so the reply waits up to
+# telemetry_timeout_seconds when the node doesn't answer (repeaters/telemetry-off
+# nodes). Set telemetry_in_test = false to make it opt-in via `test full` only.
 telemetry_in_test = true
-telemetry_timeout_seconds = 3.0
+telemetry_timeout_seconds = 2.0
 # 'test full' / 'test detail' sends a multi-line report (named path, quality, tuning).
 full_report_enabled = true
 # Link-quality floors for the verdict + margin. Defaults match our SF7 / BW 62.5 kHz

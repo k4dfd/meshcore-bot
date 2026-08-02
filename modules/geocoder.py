@@ -24,12 +24,11 @@ _DATA_PATH = os.path.join(os.path.dirname(__file__), "geodata", "us_cities.tsv.g
 
 _lock = threading.Lock()
 _rows: Optional[list[tuple[str, str, float, float]]] = None  # (name, state, lat, lon)
-_load_failed = False
 
 
 def _load() -> list[tuple[str, str, float, float]]:
     """Load and cache the city dataset. Returns [] if unavailable (cached)."""
-    global _rows, _load_failed
+    global _rows
     if _rows is not None:
         return _rows
     with _lock:
@@ -48,7 +47,7 @@ def _load() -> list[tuple[str, str, float, float]]:
                     except ValueError:
                         continue
         except OSError:
-            _load_failed = True
+            pass  # dataset missing/unreadable -> empty; callers degrade to no city
         _rows = rows
         return _rows
 

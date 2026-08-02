@@ -82,9 +82,9 @@ class TestCommand(BaseCommand):
         try:
             self.telemetry_timeout = max(
                 1.0, min(8.0, bot.config.getfloat(
-                    'Test_Command', 'telemetry_timeout_seconds', fallback=3.0)))
+                    'Test_Command', 'telemetry_timeout_seconds', fallback=2.0)))
         except Exception:
-            self.telemetry_timeout = 3.0
+            self.telemetry_timeout = 2.0
         # Link-quality floors (SF7/BW62.5 defaults; override for other presets).
         try:
             self.snr_floor_db = bot.config.getfloat(
@@ -140,39 +140,30 @@ class TestCommand(BaseCommand):
         cleaned = ' '.join(cleaned.split())
         return cleaned
 
-    def matches_keyword(self, message: MeshMessage) -> bool:
-        """Override to implement special test keyword matching with optional phrase.
+    def _extract_phrase(self, raw_content: str) -> Optional[str]:
+        """Single source of truth for test-keyword parsing.
 
-        Matches 'test', 't', 'test <phrase>', or 't <phrase>'.
-
-        Args:
-            message: The message to check.
-
-        Returns:
-            bool: True if the message matches the keyword patterns.
+        Returns the phrase after 'test'/'t' ('' for a bare command), or None when
+        the message is not a test command at all. Used by matches_keyword,
+        _assemble_fields, and _is_full_request so the parse never drifts.
         """
-        # Clean content to remove control characters and normalize whitespace
-        content = self.clean_content(message.content)
-
-        # Strip exclamation mark if present (for command-style messages)
+        content = self.clean_content(raw_content)
         if content.startswith('!'):
             content = content[1:].strip()
+        low = content.lower()
+        if low in ("test", "t"):
+            return ""
+        if content.startswith('test ') or content.startswith('Test '):
+            phrase = content[5:].strip()
+            return phrase if phrase else None  # "test " with no phrase isn't a match
+        if content.startswith('t ') or content.startswith('T '):
+            phrase = content[2:].strip()
+            return phrase if phrase else None
+        return None
 
-        # Handle "test" alone or "test " with phrase
-        if content.lower() == "test":
-            return True  # Just "test" by itself
-        elif (content.startswith('test ') or content.startswith('Test ')) and len(content) > 5:
-            phrase = content[5:].strip()  # Get everything after "test " and strip whitespace
-            return bool(phrase)  # Make sure there's actually a phrase
-
-        # Handle "t" alone or "t " with phrase
-        elif content.lower() == "t":
-            return True  # Just "t" by itself
-        elif (content.startswith('t ') or content.startswith('T ')) and len(content) > 2:
-            phrase = content[2:].strip()  # Get everything after "t " and strip whitespace
-            return bool(phrase)  # Make sure there's actually a phrase
-
-        return False
+    def matches_keyword(self, message: MeshMessage) -> bool:
+        """Match 'test', 't', 'test <phrase>', or 't <phrase>' (see _extract_phrase)."""
+        return self._extract_phrase(message.content) is not None
 
     DEFAULT_FORMAT = (
         "ack @[{sender}]{phrase_part} | {hops_label} | SNR {snr}dB RSSI {rssi}dBm "
@@ -769,17 +760,24 @@ class TestCommand(BaseCommand):
             self.logger.debug(f"repeater name lookup failed for {node_id}: {e}")
             return None
 
-    def _path_named(self, message: MeshMessage) -> str:
-        """Human path 'NAME (City) > NAME (City)' from the multi-byte path nodes."""
+    def _path_named(self, message: MeshMessage, include_city: bool = True) -> str:
+        """Human path from the multi-byte path nodes.
+
+        include_city=True → 'NAME (City) > NAME (City)'; False → 'NAME > NAME'
+        (the plain form is the length fallback when the city form won't fit).
+        """
         node_ids = self._extract_path_node_ids(message)
         if not node_ids:
             return ""
         parts = []
         for nid in node_ids:
             label = self._lookup_repeater_name(nid) or nid
-            loc = self._lookup_repeater_location(nid, path_context=node_ids)
-            city = nearest_city(loc[0], loc[1]) if (loc and self.geocode_enabled) else None
-            parts.append(f"{label} ({city})" if city else label)
+            if include_city and self.geocode_enabled:
+                loc = self._lookup_repeater_location(nid, path_context=node_ids)
+                city = nearest_city(loc[0], loc[1]) if loc else None
+                parts.append(f"{label} ({city})" if city else label)
+            else:
+                parts.append(label)
         return " > ".join(parts)
 
     def _split_mode(self, phrase: str) -> tuple[bool, str]:
@@ -802,7 +800,10 @@ class TestCommand(BaseCommand):
         try:
             for _k, cd in contacts.items():
                 pk = cd.get('public_key', '')
-                if pk and (pk == pubkey or pk.startswith(pubkey) or pubkey.startswith(pk)):
+                # sender_pubkey is a full key; match exact, or a stored full key
+                # that our (possibly prefix) value begins — never the reverse, so
+                # a short prefix can't resolve an unrelated node.
+                if pk and (pk == pubkey or pk.startswith(pubkey)):
                     return cd
         except Exception:
             return None
@@ -824,11 +825,11 @@ class TestCommand(BaseCommand):
             mc = self.bot.meshcore
             lpp = await asyncio.wait_for(
                 mc.commands.req_telemetry_sync(contact, timeout=self.telemetry_timeout),
-                timeout=self.telemetry_timeout + 1.5,
+                timeout=self.telemetry_timeout + 0.5,  # hard ceiling just above the lib's own wait
             )
             parsed = parse_lpp(lpp)
             return (parsed['battery_v'], parsed['temp_c'], parsed['humidity_pct'])
-        except (asyncio.TimeoutError, Exception) as e:
+        except Exception as e:  # asyncio.TimeoutError is an Exception; CancelledError (BaseException) still propagates
             self.logger.debug(f"test telemetry pull failed/timed out: {e}")
             return (None, None, None)
 
@@ -857,9 +858,29 @@ class TestCommand(BaseCommand):
             'batt_suffix': f" | batt {batt:.2f}V" if batt is not None else "",
         }
 
+    def _clip_to_budget(self, text: str, budget: int) -> str:
+        """UTF-8 byte-aware truncation to `budget` bytes (…-terminated) so a chunk
+        can't exceed the firmware cipher-block limit and get silently cut."""
+        if budget <= 0:
+            return text
+        encoded = text.encode('utf-8')
+        if len(encoded) <= budget:
+            return text
+        clipped = encoded[:max(0, budget - 3)].decode('utf-8', 'ignore').rstrip()
+        return clipped + "…"
+
     def _build_full_report(self, message: MeshMessage, base_fields: dict[str, str]) -> list[str]:
-        """Multi-line detailed report for 'test full' (empty lines dropped)."""
+        """Multi-line detailed report for 'test full' (empty lines dropped).
+
+        Each line is budgeted to the message's max length so a long named path
+        can't overflow a chunk; the Path line first sheds its (City) suffixes,
+        then truncates as a last resort.
+        """
         ef = base_fields
+        try:
+            budget = int(self.get_max_message_length(message))
+        except Exception:
+            budget = 150
         sender = ef.get('sender') or 'node'
         bot_name = self.bot.config.get('Bot', 'bot_name', fallback='bot') or 'bot'
         bot_city = ef.get('bot_city') or bot_name
@@ -874,6 +895,10 @@ class TestCommand(BaseCommand):
         line3 = ""
         if pn:
             line3 = f"Path: {pn}" + (f" · {pb}" if pb else "")
+            if budget and len(line3.encode('utf-8')) > budget:
+                # Too long with cities — fall back to plain node names before clipping.
+                pn_plain = self._path_named(message, include_city=False)
+                line3 = f"Path: {pn_plain}" + (f" · {pb}" if pb else "")
         elif pb:
             line3 = f"Path: {pb}"
         hint = ef.get('quality_hint')
@@ -881,21 +906,11 @@ class TestCommand(BaseCommand):
         node = ""
         if self._node_batt is not None or self._node_temp is not None:
             node = f"Node: batt {ef.get('node_batt')}V · {ef.get('node_temp')}°C"
-        return [ln for ln in (line1, line2, line3, line4, node) if ln]
+        return [self._clip_to_budget(ln, budget) for ln in (line1, line2, line3, line4, node) if ln]
 
     def _assemble_fields(self, message: MeshMessage) -> dict[str, str]:
         """Build the complete template field set (core + enhanced) for a message."""
-        content = self.clean_content(message.content)
-        if content.startswith('!'):
-            content = content[1:].strip()
-        if content.lower() in ("test", "t"):
-            phrase = ""
-        elif content.startswith('test ') or content.startswith('Test '):
-            phrase = content[5:].strip()
-        elif content.startswith('t ') or content.startswith('T '):
-            phrase = content[2:].strip()
-        else:
-            phrase = ""
+        phrase = self._extract_phrase(message.content) or ""
         # Strip a leading verbosity token ('full'/'detail') so it isn't echoed.
         _full, phrase = self._split_mode(phrase)
 
@@ -918,7 +933,7 @@ class TestCommand(BaseCommand):
             'hops_label': hops_label,
             'timestamp': self.format_timestamp(message),
             'elapsed': self.format_elapsed(message),
-            'snr': str(message.snr) if message.snr is not None else self.translate('common.unknown'),
+            'snr': str(message.snr) if message.snr is not None else '—',
             'path_distance': self._calculate_path_distance(message) or '',
             'firstlast_distance': self._calculate_firstlast_distance(message) or '',
         }
@@ -971,16 +986,8 @@ class TestCommand(BaseCommand):
 
     def _is_full_request(self, message: MeshMessage) -> bool:
         """True when the message is 'test full' / 't detail' etc."""
-        content = self.clean_content(message.content)
-        if content.startswith('!'):
-            content = content[1:].strip()
-        if content.lower() in ("test", "t"):
-            return False
-        if content.startswith('test ') or content.startswith('Test '):
-            phrase = content[5:].strip()
-        elif content.startswith('t ') or content.startswith('T '):
-            phrase = content[2:].strip()
-        else:
+        phrase = self._extract_phrase(message.content)
+        if not phrase:  # None (not a test) or "" (bare test) → not a full request
             return False
         full, _ = self._split_mode(phrase)
         return full
