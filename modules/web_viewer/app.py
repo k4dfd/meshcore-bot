@@ -1557,10 +1557,43 @@ class BotDataViewer:
                     keys.append(pubkey)
             else:
                 keys = [k for k in keys if k != pubkey]
-            self.config.set('Admin_ACL', 'admin_pubkeys', ','.join(keys))
+            newval = ','.join(keys)
+            self.config.set('Admin_ACL', 'admin_pubkeys', newval)  # keep in-memory copy in sync
+            # Persist with a TARGETED line edit that preserves every comment and
+            # all formatting in config.ini — unlike configparser.write(), which
+            # strips all comments. Replace the admin_pubkeys line inside
+            # [Admin_ACL] (append it, or the whole section, if absent).
             try:
-                with open(self.config_path, 'w') as fh:
-                    self.config.write(fh)
+                with open(self.config_path) as fh:
+                    src_lines = fh.readlines()
+                sec_re = re.compile(r'^\s*\[([^\]]+)\]\s*$')
+                key_re = re.compile(r'^\s*#?\s*admin_pubkeys\s*=', re.IGNORECASE)
+                new_lines = []
+                in_acl = False
+                wrote = False
+                for ln in src_lines:
+                    m = sec_re.match(ln)
+                    if m:
+                        if in_acl and not wrote:
+                            new_lines.append(f'admin_pubkeys = {newval}\n')
+                            wrote = True
+                        in_acl = (m.group(1) == 'Admin_ACL')
+                        new_lines.append(ln)
+                        continue
+                    if in_acl and not wrote and key_re.match(ln):
+                        new_lines.append(f'admin_pubkeys = {newval}\n')
+                        wrote = True
+                        continue
+                    new_lines.append(ln)
+                if in_acl and not wrote:
+                    new_lines.append(f'admin_pubkeys = {newval}\n')
+                    wrote = True
+                if not wrote:
+                    new_lines.append(f'\n[Admin_ACL]\nadmin_pubkeys = {newval}\n')
+                tmp = self.config_path + '.tmp'
+                with open(tmp, 'w') as fh:
+                    fh.writelines(new_lines)
+                os.replace(tmp, self.config_path)
             except OSError as exc:
                 self.logger.error("Failed to write admin_pubkeys to config.ini: %s", exc)
                 return jsonify({'success': False, 'error': 'Could not write config.ini — check file permissions'}), 500
