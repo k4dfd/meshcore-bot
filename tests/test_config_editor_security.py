@@ -100,3 +100,108 @@ class TestConfigEditorAllowedWhenAuthenticated:
             headers={"X-Requested-With": "test"},
         )
         assert resp.status_code == 400  # not 403 — guard cleared, validation rejected it
+
+
+# ---------------------------------------------------------------------------
+# Write-correctness: the config.ini write must never corrupt the file (#28).
+# These use a real copy of config.ini.example AS config.ini and re-parse with a
+# strict ConfigParser (BasicInterpolation) — the same way the bot reads it.
+# ---------------------------------------------------------------------------
+
+import configparser  # noqa: E402
+
+
+def _make_write_viewer(tmp_path, password="secret-pw"):
+    from modules.web_viewer.app import BotDataViewer
+
+    example_src = os.path.join(_REPO_ROOT, "config.ini.example")
+    config_path = str(tmp_path / "config.ini")
+    shutil.copy2(example_src, config_path)  # config.ini starts as the full example
+    shutil.copy2(example_src, os.path.join(str(tmp_path), "config.ini.example"))
+    db_path = str(tmp_path / "meshcore_bot.db")
+
+    with patch.object(BotDataViewer, "_start_database_polling"), \
+         patch.object(BotDataViewer, "_start_log_tailing"), \
+         patch.object(BotDataViewer, "_start_cleanup_scheduler"), \
+         patch.object(BotDataViewer, "_setup_socketio_handlers"), \
+         patch("modules.web_viewer.app.RepeaterManager"):
+        viewer = BotDataViewer(db_path=db_path, config_path=config_path)
+    viewer.web_viewer_password = password  # enable the auth gate for the write path
+    viewer.app.testing = True
+    return viewer, config_path
+
+
+def _auth_client(viewer):
+    client = viewer.app.test_client()
+    with client.session_transaction() as sess:
+        sess["authenticated"] = True
+    return client
+
+
+def _reparse(config_path):
+    cp = configparser.ConfigParser()  # strict=True (default) raises on duplicate keys
+    cp.read(config_path)
+    return cp
+
+
+def _schema_setting(section, key):
+    from modules.web_viewer.app import parse_config_schema
+    with open(os.path.join(_REPO_ROOT, "config.ini.example"), encoding="utf-8") as f:
+        sections = parse_config_schema(f.read())
+    sec = next((s for s in sections if s["name"] == section), None)
+    if not sec:
+        return None
+    return next((st for st in sec["settings"] if st["key"] == key), None)
+
+
+class TestSchemaParsing:
+    def test_dm_only_typed_bool_from_active_line(self):
+        """The active `dm_only = true` must win over the commented `# dm_only = ...`
+        help lines, so it is a bool (not free text with prose)."""
+        st = _schema_setting("Schedule_Command", "dm_only")
+        assert st is not None, "dm_only missing from schema"
+        assert st["type"] == "bool"
+        assert st["commented"] is False
+
+    def test_commented_section_keys_do_not_bleed_up(self):
+        """Keys under a commented `# [CheckIn]` block must not attribute to the
+        active section above it."""
+        st = _schema_setting("DARC_MoWaS_Service", "check_in_days")
+        assert st is None  # check_in_days belongs to [CheckIn], not DARC_MoWaS_Service
+
+
+class TestWriteDoesNotCorruptConfig:
+    def test_toggle_dm_only_produces_single_active_key(self, tmp_path):
+        """The blocker: toggling a setting with commented help lines above it must
+        not create a duplicate key that makes config.ini unparseable."""
+        viewer, cfg = _make_write_viewer(tmp_path)
+        client = _auth_client(viewer)
+        resp = client.post(
+            "/api/config/set",
+            json={"section": "Schedule_Command", "key": "dm_only", "value": "false"},
+        )
+        assert resp.status_code == 200, resp.get_data(as_text=True)
+        cp = _reparse(cfg)  # must NOT raise DuplicateOptionError
+        assert cp.get("Schedule_Command", "dm_only") == "false"
+
+    def test_percent_value_roundtrips_under_interpolation(self, tmp_path):
+        """A literal % in a text value must survive a BasicInterpolation read."""
+        viewer, cfg = _make_write_viewer(tmp_path)
+        client = _auth_client(viewer)
+        resp = client.post(
+            "/api/config/set",
+            json={"section": "Bot", "key": "bot_name", "value": "100% Mesh"},
+        )
+        assert resp.status_code == 200, resp.get_data(as_text=True)
+        cp = _reparse(cfg)
+        assert cp.get("Bot", "bot_name") == "100% Mesh"
+
+    def test_empty_secret_rejected(self, tmp_path):
+        """Blanking a secret (e.g. web_viewer_password) via the API must be refused."""
+        viewer, cfg = _make_write_viewer(tmp_path)
+        client = _auth_client(viewer)
+        resp = client.post(
+            "/api/config/set",
+            json={"section": "Web_Viewer", "key": "web_viewer_password", "value": ""},
+        )
+        assert resp.status_code == 400

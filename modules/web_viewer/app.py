@@ -102,6 +102,9 @@ _CFG_RISKY_TOKENS = ('host', 'port', 'serial', 'baud', 'path', 'key',
 _CFG_ACTIVE_RE = re.compile(r'^([A-Za-z_][\w.\-]*)\s*=(.*)$')
 _CFG_COMMENT_KEY_RE = re.compile(r'^#\s*([a-z_][\w.\-]*)\s*=(.*)$')
 _CFG_SECTION_RE = re.compile(r'^\[([^\]]+)\]\s*$')
+# A standalone commented section header (e.g. "# [CheckIn]"). Treated as a section
+# boundary so a commented/optional block's keys don't bleed into the section above it.
+_CFG_COMMENT_SECTION_RE = re.compile(r'^#\s*\[([^\]]+)\]\s*$')
 _CFG_OPT_LABELS = {'recommended', 'options', 'option', 'note', 'notes', 'example',
                    'examples', 'default', 'defaults', 'format', 'warning', 'optional',
                    'required', 'available', 'e.g', 'eg', 'i.e', 'ie', 'tip', 'see'}
@@ -198,19 +201,32 @@ def parse_config_schema(example_text, current_config=None):
     """
     sections = []
     cur = None
-    seen_keys = None
+    key_index = None  # dict: key.lower() -> index into cur['settings']
     pending = []
 
     def add_setting(key, raw_value, commented):
+        kl = key.lower()
         default = (raw_value or '').strip()
         help_text = '\n'.join(pending).strip()
+        existing_idx = key_index.get(kl) if key_index is not None else None
+        if existing_idx is not None:
+            prev = cur['settings'][existing_idx]
+            # First occurrence wins UNLESS this is the real active line superseding a
+            # commented placeholder — a "# key = prose" help/example line mis-read as a
+            # value. Active-over-active and commented-over-anything keep the first.
+            if commented or not prev['commented']:
+                return
+            # Active line replaces the commented placeholder; inherit its help when the
+            # active line had none directly above it (the help was in the commented lines).
+            if not help_text:
+                help_text = prev['help']
         stype, options = _cfg_infer_type_and_options(default, help_text)
         value = default
         if (current_config is not None
                 and current_config.has_section(cur['name'])
                 and current_config.has_option(cur['name'], key)):
             value = (current_config.get(cur['name'], key) or '').strip()
-        cur['settings'].append({
+        setting = {
             'key': key,
             'value': value,
             'default': default,
@@ -220,33 +236,39 @@ def parse_config_schema(example_text, current_config=None):
             'risky': _cfg_is_risky(cur['name'], key),
             'secret': _cfg_is_secret(key),
             'commented': commented,
-        })
-        seen_keys.add(key.lower())
+        }
+        if existing_idx is not None:
+            cur['settings'][existing_idx] = setting  # replace in place, keep order
+        else:
+            cur['settings'].append(setting)
+            key_index[kl] = len(cur['settings']) - 1
 
     for raw in example_text.split('\n'):
         stripped = raw.strip()
         if stripped == '':
             pending = []
             continue
-        m_sec = _CFG_SECTION_RE.match(stripped)
+        # Active "[Section]" or standalone commented "# [Section]" both start a new
+        # section, so keys in a commented/optional block attribute to that block rather
+        # than bleeding into the section above it.
+        m_sec = _CFG_SECTION_RE.match(stripped) or _CFG_COMMENT_SECTION_RE.match(stripped)
         if m_sec:
             cur = {'name': m_sec.group(1), 'settings': []}
             sections.append(cur)
-            seen_keys = set()
+            key_index = {}
             pending = []
             continue
         if cur is None:
             continue
         if not stripped.startswith('#'):
             m = _CFG_ACTIVE_RE.match(stripped)
-            if m and m.group(1).lower() not in seen_keys:
+            if m:
                 add_setting(m.group(1), m.group(2), False)
             pending = []
             continue
         m_ck = _CFG_COMMENT_KEY_RE.match(stripped)
         if m_ck:
-            if m_ck.group(1).lower() not in seen_keys:
-                add_setting(m_ck.group(1), m_ck.group(2), True)
+            add_setting(m_ck.group(1), m_ck.group(2), True)
             pending = []
             continue
         pending.append(stripped[1:].strip())
@@ -1918,10 +1940,22 @@ class BotDataViewer:
             else:
                 value = value.strip()
 
-            # 3) Targeted, comment-preserving write to config.ini. Mirrors the
-            #    Admin_ACL endpoint: replace the `key =` line inside [section]
-            #    (uncommenting it if needed); append the key or whole section if
-            #    absent; atomic os.replace.
+            # A blank secret would silently disable protection on reload (clearing
+            # web_viewer_password turns off ALL auth), so refuse it — mirror the UI guard.
+            if spec['secret'] and value == '':
+                return jsonify({'success': False,
+                                'error': 'A secret value cannot be blank. Edit config.ini directly to clear it.'}), 400
+
+            # Escape a literal '%' so the bot's ConfigParser (BasicInterpolation) does not
+            # raise on the next read. ConfigParser.write() does the same; the hand-rolled
+            # line write must too. Applied to the value written to disk and set in memory.
+            write_value = value.replace('%', '%%')
+
+            # 3) Targeted, comment-preserving write to config.ini. Replace the ACTIVE
+            #    (non-commented) `key =` line inside [section]; NEVER a commented help /
+            #    example line — uncommenting one would leave two active keys and make the
+            #    file unparseable. If no active line exists, append the key under the
+            #    section (creating the section if needed). Atomic os.replace.
             try:
                 with open(self.config_path, encoding='utf-8') as fh:
                     src_lines = fh.readlines()
@@ -1930,8 +1964,9 @@ class BotDataViewer:
                 return jsonify({'success': False, 'error': 'Could not read config.ini — check file permissions'}), 500
 
             sec_re = re.compile(r'^\s*\[([^\]]+)\]\s*$')
-            key_re = re.compile(r'^\s*#?\s*' + re.escape(key) + r'\s*=', re.IGNORECASE)
-            new_line = f'{key} = {value}\n'
+            # Match ONLY an active assignment (no leading '#') so commented lines are left intact.
+            key_re = re.compile(r'^\s*' + re.escape(key) + r'\s*=', re.IGNORECASE)
+            new_line = f'{key} = {write_value}\n'
             new_lines = []
             in_section = False
             section_seen = False
@@ -1972,10 +2007,11 @@ class BotDataViewer:
                 self.logger.error("config set: could not write config.ini: %s", exc)
                 return jsonify({'success': False, 'error': 'Could not write config.ini — check file permissions'}), 500
 
-            # 4) Keep the in-memory config in sync.
+            # 4) Keep the in-memory config in sync (store the %-escaped form so a later
+            #    interpolated .get() returns the intended literal, matching the file).
             if not self.config.has_section(section):
                 self.config.add_section(section)
-            self.config.set(section, key, value)
+            self.config.set(section, key, write_value)
 
             # 5) Queue a live reload (best-effort — the write already persisted).
             reload_queued = False
