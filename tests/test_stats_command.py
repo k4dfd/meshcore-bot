@@ -239,58 +239,6 @@ class TestRecordCommand:
 # record_path_stats
 # ---------------------------------------------------------------------------
 
-class TestRecordPathStats:
-    def test_record_path_stats_valid_path(self):
-        bot = _make_bot(enabled=True)
-        cmd = StatsCommand(bot)
-        msg = mock_message(content="hello", channel="general", sender_id="Alice")
-        msg.timestamp = 1000
-        msg.hops = 3
-        msg.path = "aa,bb,cc"
-        cmd.record_path_stats(msg)
-
-    def test_record_path_stats_no_hops(self):
-        bot = _make_bot(enabled=True)
-        cmd = StatsCommand(bot)
-        msg = mock_message(content="hello", channel="general")
-        msg.hops = 0
-        msg.path = "aa,bb"
-        cmd.record_path_stats(msg)
-
-    def test_record_path_stats_none_hops(self):
-        bot = _make_bot(enabled=True)
-        cmd = StatsCommand(bot)
-        msg = mock_message(content="hello", channel="general")
-        msg.hops = None
-        msg.path = "aa,bb"
-        cmd.record_path_stats(msg)
-
-    def test_record_path_stats_no_path(self):
-        bot = _make_bot(enabled=True)
-        cmd = StatsCommand(bot)
-        msg = mock_message(content="hello", channel="general")
-        msg.hops = 2
-        msg.path = None
-        cmd.record_path_stats(msg)
-
-    def test_record_path_stats_descriptive_path_skipped(self):
-        bot = _make_bot(enabled=True)
-        cmd = StatsCommand(bot)
-        msg = mock_message(content="hello", channel="general")
-        msg.hops = 2
-        msg.path = "Routed through 2 hops"
-        cmd.record_path_stats(msg)
-
-    def test_record_path_stats_disabled(self):
-        bot = _make_bot(enabled=True)
-        cmd = StatsCommand(bot)
-        cmd.collect_stats = False
-        msg = mock_message(content="hello", channel="general")
-        msg.hops = 2
-        msg.path = "aa,bb"
-        cmd.record_path_stats(msg)
-
-
 # ---------------------------------------------------------------------------
 # execute — basic paths
 # ---------------------------------------------------------------------------
@@ -892,3 +840,108 @@ class TestGetStatsSummary:
         cmd.logger = bot.logger
         result = cmd.get_stats_summary()
         assert result == {}
+
+
+class TestRecordPathStats:
+    """record_path_stats must populate path_stats for the home-page Longest Paths
+    module (#31). The clean node path + hop count come from message.routing_info
+    (authoritative RF routing); message.hops is often the 255 'unknown' sentinel and
+    message.path is a descriptive string, so neither can be trusted directly."""
+
+    def _rows(self, cmd):
+        with cmd.bot.db_manager.connection() as conn:
+            return conn.execute(
+                "SELECT sender_id, path_length, path_string, hops FROM path_stats"
+            ).fetchall()
+
+    def test_records_from_routing_info_ignoring_sentinel_hops(self):
+        cmd = StatsCommand(_make_bot())
+        msg = mock_message(
+            sender_id="Alice",
+            hops=255,  # sentinel default — routing_info must win
+            path="75,24,1d (3 hops via FLOOD)",  # descriptive — must not be stored raw
+            routing_info={"path_nodes": ["75", "24", "1d"], "path_length": 3, "route_type": "FLOOD"},
+            timestamp=1000,
+        )
+        cmd.record_path_stats(msg)
+        rows = self._rows(cmd)
+        assert len(rows) == 1
+        _sender, path_length, path_string, hops = rows[0]
+        assert hops == 3
+        assert path_length == 3
+        assert path_string == "75,24,1d"
+
+    def test_records_by_stripping_descriptive_path_when_no_routing(self):
+        cmd = StatsCommand(_make_bot())
+        msg = mock_message(
+            sender_id="Bob",
+            hops=3,
+            path="75,24,1d (3 hops via FLOOD)",
+            routing_info=None,
+            timestamp=1000,
+        )
+        cmd.record_path_stats(msg)
+        rows = self._rows(cmd)
+        assert len(rows) == 1
+        assert rows[0][2] == "75,24,1d"
+        assert rows[0][3] == 3
+
+    def test_infers_hops_from_node_count_when_hops_missing(self):
+        cmd = StatsCommand(_make_bot())
+        msg = mock_message(
+            sender_id="Carol",
+            hops=None,
+            path=None,
+            routing_info={"path_nodes": ["aa", "bb", "cc", "dd"], "route_type": "FLOOD"},
+            timestamp=1000,
+        )
+        cmd.record_path_stats(msg)
+        rows = self._rows(cmd)
+        assert len(rows) == 1
+        assert rows[0][3] == 4  # inferred from 4 path_nodes
+        assert rows[0][2] == "aa,bb,cc,dd"
+
+    def test_direct_zero_hop_not_recorded(self):
+        cmd = StatsCommand(_make_bot())
+        msg = mock_message(
+            sender_id="Dave",
+            hops=0,
+            path="Direct via DIRECT",
+            routing_info={"path_nodes": [], "path_length": 0, "route_type": "DIRECT"},
+            timestamp=1000,
+        )
+        cmd.record_path_stats(msg)
+        assert self._rows(cmd) == []
+
+    def test_sentinel_hops_no_path_not_recorded(self):
+        cmd = StatsCommand(_make_bot())
+        msg = mock_message(
+            sender_id="Eve", hops=255, path=None, routing_info=None, timestamp=1000
+        )
+        cmd.record_path_stats(msg)
+        assert self._rows(cmd) == []
+
+    def test_descriptive_only_path_not_recorded(self):
+        cmd = StatsCommand(_make_bot())
+        msg = mock_message(
+            sender_id="Frank",
+            hops=3,
+            path="Unknown routing (3 hops)",
+            routing_info=None,
+            timestamp=1000,
+        )
+        cmd.record_path_stats(msg)
+        assert self._rows(cmd) == []
+
+    def test_not_recorded_when_collection_disabled(self):
+        cmd = StatsCommand(_make_bot())
+        cmd.collect_stats = False
+        msg = mock_message(
+            sender_id="Grace",
+            hops=3,
+            path="aa,bb,cc",
+            routing_info={"path_nodes": ["aa", "bb", "cc"], "path_length": 3},
+            timestamp=1000,
+        )
+        cmd.record_path_stats(msg)
+        assert self._rows(cmd) == []

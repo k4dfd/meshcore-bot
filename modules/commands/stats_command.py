@@ -206,6 +206,51 @@ class StatsCommand(BaseCommand):
         except Exception as e:
             self.logger.error(f"Error recording command stats: {e}")
 
+    # Upstream sets path_len to this sentinel when the real hop count is unknown.
+    _UNKNOWN_HOPS = 255
+
+    def _derive_path_and_hops(self, message: MeshMessage) -> tuple[int, str]:
+        """Derive ``(hops, clean_path)`` for path-stats, preferring RF routing_info.
+
+        ``message.hops`` is frequently the 255 "unknown" sentinel and ``message.path``
+        is often a descriptive string (e.g. ``"75,24,1d (3 hops via FLOOD)"``), so
+        neither can be trusted directly — using them is why path_stats stayed empty.
+        The authoritative clean node list lives on ``message.routing_info``
+        (``path_nodes`` / ``path_length``). Falls back to stripping the descriptive
+        suffix off ``message.path``. Returns ``(0, "")`` when there is no usable
+        multi-hop path (e.g. a direct 0-hop message).
+        """
+        routing = getattr(message, "routing_info", None) or {}
+        path_nodes = routing.get("path_nodes") or []
+        if path_nodes:
+            clean_path = ",".join(str(n) for n in path_nodes)
+            path_length = routing.get("path_length")
+            if isinstance(path_length, int) and 0 < path_length < self._UNKNOWN_HOPS:
+                hops = path_length
+            else:
+                hops = len(path_nodes)
+            return (hops, clean_path)
+
+        # No routing node list — try to recover a clean node path from message.path,
+        # dropping any descriptive suffix like " (3 hops via FLOOD)".
+        clean_path = ""
+        if message.path:
+            head = str(message.path).split(" (", 1)[0].strip()
+            if self._is_valid_path_format(head):
+                clean_path = head
+        if not clean_path:
+            return (0, "")
+
+        if isinstance(message.hops, int) and 0 < message.hops < self._UNKNOWN_HOPS:
+            hops = message.hops
+        elif message.hops is None or message.hops == self._UNKNOWN_HOPS:
+            # Genuinely unknown hop count — infer from the recovered node path.
+            hops = len([n for n in clean_path.split(",") if n])
+        else:
+            # An explicit non-positive hop count (e.g. 0 = direct) is not a multi-hop path.
+            hops = 0
+        return (hops, clean_path)
+
     def record_path_stats(self, message: MeshMessage) -> None:
         """Record path statistics for longest path tracking.
 
@@ -215,13 +260,9 @@ class StatsCommand(BaseCommand):
         if not self.collect_stats or not self.track_all_messages:
             return
 
-        # Only record if we have meaningful path data
-        if not message.hops or message.hops <= 0 or not message.path:
-            return
-
-        # Only record paths that contain actual node IDs (hex characters or comma-separated)
-        # Skip descriptive paths like "Routed through X hops"
-        if not self._is_valid_path_format(message.path):
+        # Derive a trustworthy hop count + clean node path (routing_info preferred).
+        hops, clean_path = self._derive_path_and_hops(message)
+        if hops <= 0 or not clean_path or not self._is_valid_path_format(clean_path):
             return
 
         try:
@@ -232,7 +273,7 @@ class StatsCommand(BaseCommand):
                 sender_id = f"user_{hashlib.md5(sender_id.encode()).hexdigest()[:8]}"
 
             # Format the path string properly (e.g., "75,24,1d,5f,bd")
-            path_string = self._format_path_for_display(message.path)
+            path_string = self._format_path_for_display(clean_path)
 
             with self.bot.db_manager.connection() as conn:
                 cursor = conn.cursor()
@@ -244,9 +285,9 @@ class StatsCommand(BaseCommand):
                     message.timestamp or int(time.time()),
                     sender_id,
                     message.channel,
-                    message.hops,  # Use hops as path length
+                    hops,  # Use hops as path length
                     path_string,
-                    message.hops
+                    hops
                 ))
                 conn.commit()
         except Exception as e:
