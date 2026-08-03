@@ -1391,8 +1391,8 @@
         userMessage.innerHTML = `
             <div class="user-message p-2 rounded" style="max-width: 80%;">
                 <div class="d-flex align-items-center mb-1">
-                    <strong class="text-primary me-2">${data.user || 'Unknown'}</strong>
-                    <small class="text-muted me-2">${data.channel || 'Unknown'}</small>
+                    <strong class="text-primary me-2">${escapeHtml(data.user || 'Unknown')}</strong>
+                    <small class="text-muted me-2">${escapeHtml(data.channel || 'Unknown')}</small>
                     <small class="text-muted ms-auto">${data.timestamp ? new Date(data.timestamp * 1000).toLocaleTimeString() : new Date().toLocaleTimeString()}</small>
                 </div>
                 <div class="fw-bold">${escapeHtml(data.user_input || `/${data.command || 'Unknown Command'}`)}</div>

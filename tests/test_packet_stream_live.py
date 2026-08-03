@@ -253,3 +253,15 @@ class TestFlushEmitsCommittedRows:
         with patch("sqlite3.connect"):
             bi._flush_write_queue()
         bi._emit_live_rows.assert_not_called()
+
+    def test_failed_commit_does_not_emit(self):
+        """Best-effort guarantee: only committed rows are emitted. A DB failure
+        requeues the rows and must NOT push anything to live subscribers."""
+        bi = _make_bot_integration()
+        bi._emit_live_rows = Mock()
+        bi._requeue_rows = Mock()  # avoid the real re-queue side effect
+        bi._write_queue.put((1.0, '{"a": 1}', "packet"))
+        with patch("sqlite3.connect", side_effect=Exception("disk I/O error")):
+            bi._flush_write_queue()
+        bi._emit_live_rows.assert_not_called()
+        bi._requeue_rows.assert_called_once()

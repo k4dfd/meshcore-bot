@@ -82,6 +82,11 @@ message_correlation_timeout = 10.0
 # Enable enhanced correlation strategies
 enable_enhanced_correlation = true
 
+# Live packet feed (web viewer): dedup window in seconds. A single mesh packet is
+# often heard via several RF paths; within this window the same packet is captured
+# to the packet_stream only once so the live feed is not spammed. Default 30.0.
+web_capture_dedup_window = 30.0
+
 # Bot node ID (leave empty for auto-assignment)
 node_id = 
 
@@ -1517,6 +1522,11 @@ auto_start = false
 # viewer_stop_force_timeout_sec = 2.0
 # port_cleanup_lsof_timeout_sec = 5.0
 # port_cleanup_kill_timeout_sec = 2.0
+
+# Max rows buffered in the packet_stream write queue before backpressure kicks in.
+# The queue batches DB inserts off the event loop; if it fills (sustained packet
+# flood), the producer flushes inline. Raise for very busy meshes. Default 1000.
+# packet_stream_write_queue_max = 1000
 
 # Optional: database path for web viewer. If unset, the viewer uses [Bot] db_path (recommended).
 # Only set this if you use a separate database for the viewer; you will see a startup warning.

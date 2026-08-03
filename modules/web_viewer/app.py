@@ -5,6 +5,7 @@ Bot montoring web interface using Flask-SocketIO 5.x
 """
 
 import configparser
+import hmac
 import json
 import logging
 import os
@@ -1233,6 +1234,16 @@ class BotDataViewer:
                 return
             if session.get('authenticated'):
                 return
+            # The internal bot→viewer stream endpoint authenticates with the shared
+            # X-Stream-Token secret, not a browser session. Without this, a configured
+            # web_viewer_password 401s the bot's own live packet/command/mesh push here
+            # (before the route's own token check ever runs), silently killing the feed.
+            # A valid token is the sole way in; browsers cannot obtain it.
+            if request.path == '/api/stream_data':
+                token = request.headers.get('X-Stream-Token', '')
+                expected = self.db_manager.get_metadata('internal.stream_token') if self.db_manager else None
+                if expected and token and hmac.compare_digest(str(token), str(expected)):
+                    return
             if request.path.startswith('/api/'):
                 return make_response(jsonify({'error': 'Authentication required'}), 401)
             next_url = request.path
@@ -2754,7 +2765,7 @@ class BotDataViewer:
                 if not current_app.config.get('TESTING'):
                     token = request.headers.get('X-Stream-Token', '')
                     expected = self.db_manager.get_metadata('internal.stream_token') if self.db_manager else None
-                    if not expected or not token or token != expected:
+                    if not expected or not token or not hmac.compare_digest(str(token), str(expected)):
                         return jsonify({'error': 'Unauthorized'}), 401
 
                 data = request.get_json()
@@ -2776,7 +2787,8 @@ class BotDataViewer:
                 return jsonify({'status': 'success'})
             except Exception as e:
                 self.logger.error(f"Error in stream_data endpoint: {e}")
-                return jsonify({'error': str(e)}), 500
+                # Do not leak internal error detail to the caller.
+                return jsonify({'error': 'Internal error'}), 500
 
         @self.app.route('/api/recent_commands')
         def api_recent_commands():
