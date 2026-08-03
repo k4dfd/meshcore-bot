@@ -282,6 +282,7 @@ def _cfg_example_path(config_path):
 
 from modules.config_snapshot import config_to_redacted_sections
 from modules.feed_manager import FeedManager
+from modules.nodey import service as nodey_service
 from modules.repeater_manager import RepeaterManager
 from modules.url_shortener import _coerce_url_string
 from modules.utils import calculate_distance, resolve_path
@@ -2025,6 +2026,80 @@ class BotDataViewer:
             disp = '***' if spec['secret'] else value
             self.logger.info("Config updated via editor: [%s] %s = %s", section, key, disp)
             return jsonify({'success': True, 'section': section, 'key': key, 'reload_queued': reload_queued})
+
+        # ── Ask Nodey — in-app read-only AI assistant (#30) ──────────────────
+        def _nodey_guard(as_json: bool):
+            """Fail-closed gate for Nodey. It exposes the bot's internal knowledge
+            (architecture, file paths) and consumes the LLM budget, so it must not
+            be reachable without authentication. require_auth only enforces a
+            session when web_viewer_password is set; without one the whole viewer is
+            open, so refuse Nodey entirely rather than expose it unauthenticated."""
+            if self.web_viewer_password:
+                return None  # require_auth enforces the authenticated session
+            if as_json:
+                return jsonify({'error': 'Nodey is disabled until web_viewer_password is set.'}), 403
+            return render_template(
+                'error.html', error_code=403,
+                error_title='Nodey is locked',
+                error_message=('Set web_viewer_password in the [Web_Viewer] config to enable '
+                               'the Nodey assistant. It is disabled without authentication.'),
+            ), 403
+
+        def _nodey_operator_name():
+            """Name Nodey addresses the operator by: [Nodey] operator_name, else ''."""
+            try:
+                return (self.config.get('Nodey', 'operator_name', fallback='') or '').strip()
+            except Exception:
+                return ''
+
+        @self.app.route('/nodey')
+        def nodey_page():
+            denied = _nodey_guard(as_json=False)
+            if denied is not None:
+                return denied
+            return render_template('nodey.html')
+
+        @self.app.route('/api/nodey/status')
+        def api_nodey_status():
+            denied = _nodey_guard(as_json=True)
+            if denied is not None:
+                return denied
+            cfg = nodey_service.load_config(self.config)
+            from modules.nodey import provider as _np
+            return jsonify({
+                'configured': nodey_service.is_configured(cfg),
+                'model': cfg.model if cfg.enabled else '',
+                'provider': _np.provider_name(cfg.base_url) if cfg.base_url else '',
+            })
+
+        @self.app.route('/api/nodey/chat', methods=['POST'])
+        def api_nodey_chat():
+            denied = _nodey_guard(as_json=True)
+            if denied is not None:
+                return denied
+            data = request.get_json(silent=True) or {}
+            history = data.get('messages')
+            if not isinstance(history, list):
+                return jsonify({'error': 'messages must be a list'}), 400
+            cfg = nodey_service.load_config(self.config)
+            operator = _nodey_operator_name()
+
+            def _generate():
+                try:
+                    for delta in nodey_service.stream_reply(cfg, operator, history):
+                        if delta:
+                            yield 'data: ' + json.dumps({'delta': delta}) + '\n\n'
+                except Exception as exc:  # noqa: BLE001 - never break the SSE stream
+                    self.logger.error("Nodey chat stream error: %s", exc)
+                    yield 'data: ' + json.dumps(
+                        {'delta': '\n\n_(Nodey hit an unexpected error.)_'}) + '\n\n'
+                yield 'data: ' + json.dumps({'done': True}) + '\n\n'
+
+            return Response(
+                _generate(),
+                mimetype='text/event-stream',
+                headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+            )
 
         # ── Maintenance config ───────────────────────────────────────────────
 

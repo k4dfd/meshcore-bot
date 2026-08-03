@@ -1,0 +1,201 @@
+{% extends "base.html" %}
+
+{% block title %}Ask Nodey · MeshCore Bot{% endblock %}
+
+{% block extra_css %}
+<style>
+    .nodey-wrap { max-width: 900px; margin: 0 auto; display: flex; flex-direction: column;
+        height: calc(100vh - 160px); min-height: 420px; }
+    .nodey-head { display: flex; align-items: center; gap: 0.6rem; margin-bottom: 0.5rem; }
+    .nodey-head .badge { font-weight: 500; }
+    .nodey-msgs { flex: 1 1 auto; overflow-y: auto; padding: 0.5rem; border: 1px solid var(--border-color);
+        border-radius: 0.5rem; background: var(--card-bg, rgba(0,0,0,0.15)); }
+    .nodey-msg { display: flex; margin-bottom: 0.75rem; }
+    .nodey-msg .bubble { max-width: 85%; padding: 0.55rem 0.75rem; border-radius: 0.6rem;
+        white-space: pre-wrap; word-wrap: break-word; line-height: 1.4; }
+    .nodey-msg.user { justify-content: flex-end; }
+    .nodey-msg.user .bubble { background: var(--bs-primary, #0d6efd); color: #fff; }
+    .nodey-msg.assistant .bubble { background: rgba(127,127,127,0.15); border: 1px solid var(--border-color); }
+    .nodey-msg .bubble pre.nodey-code { white-space: pre; overflow-x: auto; background: rgba(0,0,0,0.35);
+        padding: 0.5rem; border-radius: 0.4rem; margin: 0.4rem 0; font-size: 0.85em; }
+    .nodey-meta { font-size: 0.72rem; opacity: 0.7; margin-top: 0.2rem; }
+    .nodey-copy { cursor: pointer; }
+    .nodey-input { display: flex; gap: 0.5rem; margin-top: 0.6rem; }
+    .nodey-input textarea { resize: none; }
+    .nodey-starters { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0.6rem 0; }
+    .nodey-note { font-size: 0.85rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="nodey-wrap">
+    <div class="nodey-head">
+        <i class="fas fa-robot fa-lg"></i>
+        <h4 class="mb-0">Ask Nodey</h4>
+        <span id="nodey-status" class="badge bg-secondary">checking…</span>
+    </div>
+    <div id="nodey-setup" class="alert alert-warning nodey-note d-none" role="alert"></div>
+
+    <div id="nodey-msgs" class="nodey-msgs" aria-live="polite"></div>
+
+    <div class="nodey-starters">
+        <button class="btn btn-sm btn-outline-secondary" data-starter="Help me use the bot — what can you do?">Help me with the bot</button>
+        <button class="btn btn-sm btn-outline-secondary" data-starter="I want to add a new feature to the bot. Ask me what I need, then draft a specification I can hand to the coding agent.">Draft a spec for a new feature</button>
+        <button class="btn btn-sm btn-outline-secondary" id="nodey-clear">Clear chat</button>
+    </div>
+
+    <form id="nodey-form" class="nodey-input" autocomplete="off">
+        <textarea id="nodey-text" class="form-control" rows="2" placeholder="Ask Nodey about the bot, troubleshooting, or a new feature…"></textarea>
+        <button id="nodey-send" class="btn btn-primary" type="submit">Send</button>
+    </form>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function () {
+    const msgsEl = document.getElementById('nodey-msgs');
+    const form = document.getElementById('nodey-form');
+    const textEl = document.getElementById('nodey-text');
+    const sendBtn = document.getElementById('nodey-send');
+    const statusEl = document.getElementById('nodey-status');
+    const setupEl = document.getElementById('nodey-setup');
+    // Conversation kept client-side and re-sent each turn.
+    const history = [];
+    let streaming = false;
+
+    function escapeHtml(s) {
+        return String(s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+    }
+
+    // Safe render: everything is escaped first. Fenced ``` blocks become <pre>.
+    // The rest is left as escaped text in a pre-wrap bubble (bullets/newlines survive).
+    function renderSafe(text) {
+        const parts = String(text).split('```');
+        let out = '';
+        for (let i = 0; i < parts.length; i++) {
+            if (i % 2 === 1) {
+                out += '<pre class="nodey-code">' + escapeHtml(parts[i].replace(/^\w*\n/, '')) + '</pre>';
+            } else {
+                out += escapeHtml(parts[i]);
+            }
+        }
+        return out;
+    }
+
+    function addMessage(role, text) {
+        const wrap = document.createElement('div');
+        wrap.className = 'nodey-msg ' + role;
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble';
+        bubble.innerHTML = renderSafe(text);
+        wrap.appendChild(bubble);
+        if (role === 'assistant') {
+            const meta = document.createElement('div');
+            meta.className = 'nodey-meta';
+            const copy = document.createElement('span');
+            copy.className = 'nodey-copy';
+            copy.innerHTML = '<i class="far fa-copy"></i> copy';
+            copy.addEventListener('click', function () {
+                navigator.clipboard.writeText(bubble.dataset.raw || '').then(function () {
+                    copy.innerHTML = '<i class="fas fa-check"></i> copied';
+                    setTimeout(function () { copy.innerHTML = '<i class="far fa-copy"></i> copy'; }, 1500);
+                });
+            });
+            meta.appendChild(copy);
+            wrap.appendChild(meta);
+            bubble.dataset.raw = text;
+        }
+        msgsEl.appendChild(wrap);
+        msgsEl.scrollTop = msgsEl.scrollHeight;
+        return bubble;
+    }
+
+    function updateAssistant(bubble, text) {
+        bubble.dataset.raw = text;
+        bubble.innerHTML = renderSafe(text);
+        msgsEl.scrollTop = msgsEl.scrollHeight;
+    }
+
+    async function send(userText) {
+        if (streaming || !userText.trim()) return;
+        streaming = true;
+        sendBtn.disabled = true;
+        addMessage('user', userText);
+        history.push({ role: 'user', content: userText });
+        const bubble = addMessage('assistant', '');
+        let acc = '';
+        try {
+            const resp = await fetch('/api/nodey/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'NodeyPanel' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ messages: history })
+            });
+            if (!resp.ok || !resp.body) {
+                updateAssistant(bubble, '_(Nodey is unavailable: HTTP ' + resp.status + ')_');
+                streaming = false; sendBtn.disabled = false; return;
+            }
+            const reader = resp.body.getReader();
+            const decoder = new TextDecoder();
+            let buf = '';
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buf += decoder.decode(value, { stream: true });
+                let idx;
+                while ((idx = buf.indexOf('\n\n')) >= 0) {
+                    const chunk = buf.slice(0, idx); buf = buf.slice(idx + 2);
+                    const line = chunk.trim();
+                    if (!line.startsWith('data:')) continue;
+                    let obj;
+                    try { obj = JSON.parse(line.slice(5).trim()); } catch (e) { continue; }
+                    if (obj.delta) { acc += obj.delta; updateAssistant(bubble, acc); }
+                    if (obj.done) { /* end of stream */ }
+                }
+            }
+        } catch (e) {
+            updateAssistant(bubble, acc + '\n\n_(Connection error talking to Nodey.)_');
+        }
+        if (acc.trim()) history.push({ role: 'assistant', content: acc });
+        streaming = false;
+        sendBtn.disabled = false;
+    }
+
+    form.addEventListener('submit', function (e) {
+        e.preventDefault();
+        const t = textEl.value; textEl.value = '';
+        send(t);
+    });
+    textEl.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
+    });
+    document.querySelectorAll('[data-starter]').forEach(function (b) {
+        b.addEventListener('click', function () { send(b.getAttribute('data-starter')); });
+    });
+    document.getElementById('nodey-clear').addEventListener('click', function () {
+        history.length = 0; msgsEl.innerHTML = '';
+    });
+
+    // Status / setup hint.
+    fetch('/api/nodey/status', { credentials: 'same-origin' })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+            if (d.configured) {
+                statusEl.className = 'badge bg-success';
+                statusEl.textContent = 'ready · ' + (d.provider || 'llm') + (d.model ? ' · ' + d.model : '');
+            } else {
+                statusEl.className = 'badge bg-warning text-dark';
+                statusEl.textContent = 'not configured';
+                setupEl.classList.remove('d-none');
+                setupEl.textContent = 'Nodey needs an LLM endpoint. Set the [Nodey] section in ' +
+                    'config.ini (base_url, model, api_key) — e.g. Cerebras, the mcdash LLM proxy, ' +
+                    'or a local model — then reload. You can chat once it shows "ready".';
+            }
+        })
+        .catch(function () { statusEl.className = 'badge bg-secondary'; statusEl.textContent = 'status unknown'; });
+})();
+</script>
+{% endblock %}

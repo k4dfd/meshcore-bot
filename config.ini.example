@@ -2083,3 +2083,40 @@ enabled = false
 # api_url = https://example.com/checkins
 # api_key = YOUR_API_KEY
 # Or set CHECKIN_API_KEY in the environment (takes precedence).
+
+####################################################################################################
+#                                                                                                  #
+#                        Nodey — in-app read-only AI assistant (#30)                               #
+#                                                                                                  #
+####################################################################################################
+
+[Nodey]
+# Nodey is a read-only assistant in the web viewer ("Ask Nodey"): the bot's user
+# manual/troubleshooter and a spec-drafting partner for new features. It is
+# fail-closed — reachable only when web_viewer_password is set. It never changes
+# settings, transmits, or runs commands. Knowledge-only (no live-data tools) in v1.
+enabled = false
+
+# Name Nodey addresses you by (optional). Set to your name for a personal touch.
+# operator_name = Christopher Akers
+
+# OpenAI-compatible chat-completions base URL (no trailing /chat/completions). Options:
+#   - mcdash LLM proxy (shared key on mcdash):  http://<mcdash-tailscale-ip>:PORT/api/llm-proxy/v1
+#   - Cerebras direct:                          https://api.cerebras.ai/v1
+#   - a local LLM on the LAN (Ollama):          http://127.0.0.1:11434/v1
+base_url =
+
+model = gpt-oss-120b
+
+# api_key is a SECRET — set it on-device only (config.ini is 0600); never commit it.
+api_key =
+
+# Optional fallback provider (used only if the primary errors BEFORE streaming).
+# fallback_base_url =
+# fallback_model =
+# fallback_api_key =
+
+# Tuning.
+timeout_seconds = 60
+max_tokens = 1024
+temperature = 0.2
