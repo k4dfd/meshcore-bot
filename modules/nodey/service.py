@@ -75,8 +75,17 @@ def load_config(config: Any) -> NodeyConfig:
 
 
 def is_configured(cfg: NodeyConfig) -> bool:
-    """True when Nodey can actually reach a brain (enabled + primary endpoint set)."""
-    return bool(cfg.enabled and cfg.base_url and cfg.api_key and cfg.model)
+    """True when Nodey can actually reach a brain (enabled + a well-formed primary
+    endpoint set). The base_url must be an http(s) URL — rejects file:/gopher:/etc.
+    schemes so a mistyped or malicious config value can't point the client at a
+    non-HTTP target."""
+    return bool(
+        cfg.enabled
+        and cfg.api_key
+        and cfg.model
+        and cfg.base_url
+        and cfg.base_url.lower().startswith(("http://", "https://"))
+    )
 
 
 def build_messages(operator_name: str, history: list[dict[str, Any]]) -> list[dict[str, str]]:

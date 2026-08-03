@@ -2028,6 +2028,28 @@ class BotDataViewer:
             return jsonify({'success': True, 'section': section, 'key': key, 'reload_queued': reload_queued})
 
         # ── Ask Nodey — in-app read-only AI assistant (#30) ──────────────────
+        # Per-client sliding-window throttle so a runaway tab/script can't spam the
+        # chat endpoint and burn the LLM token budget (auth-gated, so a light bound).
+        self._nodey_req_times: dict[str, list[float]] = {}
+        self._nodey_rate_lock = threading.Lock()
+        _NODEY_RATE_MAX = 30          # requests
+        _NODEY_RATE_WINDOW = 60.0     # per seconds, per client
+
+        def _nodey_rate_ok() -> bool:
+            now = time.time()
+            key = request.remote_addr or 'anon'
+            with self._nodey_rate_lock:
+                times = self._nodey_req_times.setdefault(key, [])
+                cutoff = now - _NODEY_RATE_WINDOW
+                times[:] = [t for t in times if t > cutoff]
+                if len(times) >= _NODEY_RATE_MAX:
+                    return False
+                times.append(now)
+                if len(self._nodey_req_times) > 200:  # bound the map
+                    for k in [k for k, v in self._nodey_req_times.items() if not v]:
+                        self._nodey_req_times.pop(k, None)
+                return True
+
         def _nodey_guard(as_json: bool):
             """Fail-closed gate for Nodey. It exposes the bot's internal knowledge
             (architecture, file paths) and consumes the LLM budget, so it must not
@@ -2077,6 +2099,8 @@ class BotDataViewer:
             denied = _nodey_guard(as_json=True)
             if denied is not None:
                 return denied
+            if not _nodey_rate_ok():
+                return jsonify({'error': 'Too many requests — give Nodey a moment.'}), 429
             data = request.get_json(silent=True) or {}
             history = data.get('messages')
             if not isinstance(history, list):

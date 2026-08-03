@@ -84,6 +84,23 @@ class TestProvider:
                                           messages=[{"role": "user", "content": "x"}]))
         assert "Could not reach" in str(ei.value)
 
+    def test_failover_uses_next_provider_on_prestream_error(self):
+        calls = []
+
+        def fake(*, base_url, **kw):
+            calls.append(base_url)
+            if base_url == "bad":
+                raise provider.ProviderError("down")
+            yield "ok"
+
+        with patch.object(provider, "stream_chat", fake):
+            out = list(provider.stream_chat_failover(
+                providers=[{"base_url": "bad", "api_key": "k", "model": "m"},
+                           {"base_url": "good", "api_key": "k", "model": "m"}],
+                messages=[]))
+        assert out == ["ok"]
+        assert calls == ["bad", "good"]
+
     def test_provider_name(self):
         assert provider.provider_name("https://api.cerebras.ai/v1") == "cerebras"
         assert provider.provider_name("https://api.openai.com/v1") == "openai"
@@ -150,6 +167,9 @@ class TestService:
         assert service.is_configured(self._cfg(enabled="false")) is False
         assert service.is_configured(self._cfg(api_key="")) is False
         assert service.is_configured(self._cfg(base_url="")) is False
+        # base_url must be an http(s) URL (rejects file:/ftp:/etc.)
+        assert service.is_configured(self._cfg(base_url="file:///etc/passwd")) is False
+        assert service.is_configured(self._cfg(base_url="ftp://x/v1")) is False
 
     def test_build_messages_sanitizes_history(self):
         history = [
@@ -255,6 +275,17 @@ class TestNodeyEndpoints:
         assert r.status_code == 200
         body = r.get_data(as_text=True)
         assert "isn't set up yet" in body and "data:" in body
+
+    def test_chat_rate_limited(self, tmp_path):
+        v = _make_viewer(tmp_path, password="pw")  # not-configured path is fine; rate check runs first
+        c = _auth(v.app.test_client())
+        statuses = [
+            c.post("/api/nodey/chat", json={"messages": []},
+                   headers={"X-Requested-With": "t"}).status_code
+            for _ in range(35)
+        ]
+        assert 429 in statuses            # throttle kicks in
+        assert statuses.count(200) <= 30  # window cap enforced
 
     def test_chat_streams_provider_deltas(self, tmp_path):
         v = _make_viewer(tmp_path, password="pw", nodey={
