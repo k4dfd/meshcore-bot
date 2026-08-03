@@ -2042,3 +2042,57 @@ class TestHandleNewContactAutoManage:
         await handler.handle_new_contact(ev, None)
         assert rm.track_contact_advertisement.await_count == 2
         rm.add_companion_from_contact_data.assert_awaited_once()
+
+
+class TestFindRecentRfDataWithPath:
+    """_find_recent_rf_data_with_path: prefer the most-recent cached RF entry that
+    actually carries a routing path, so channel messages (which have no packet prefix)
+    attach the multi-hop path instead of a pathless most-recent packet (#31)."""
+
+    def test_prefers_most_recent_entry_that_has_path(self, handler):
+        now = time.time()
+        handler.recent_rf_data = [
+            {"timestamp": now - 1.0, "routing_info": {"path_nodes": ["aa", "bb"]}},
+            {"timestamp": now - 0.1, "routing_info": {}},  # newest but pathless
+            {"timestamp": now - 0.5, "routing_info": {"path_nodes": ["cc", "dd", "ee"]}},
+        ]
+        r = handler._find_recent_rf_data_with_path(15.0)
+        assert r is not None
+        assert r["routing_info"]["path_nodes"] == ["cc", "dd", "ee"]
+
+    def test_returns_none_when_no_entry_has_path(self, handler):
+        now = time.time()
+        handler.recent_rf_data = [
+            {"timestamp": now - 0.1, "routing_info": {}},
+            {"timestamp": now - 0.2, "routing_info": {"path_nodes": []}},
+            {"timestamp": now - 0.3},  # no routing_info at all
+        ]
+        assert handler._find_recent_rf_data_with_path(15.0) is None
+
+    def test_respects_age_window(self, handler):
+        now = time.time()
+        handler.recent_rf_data = [
+            {"timestamp": now - 100.0, "routing_info": {"path_nodes": ["aa"]}},
+        ]
+        assert handler._find_recent_rf_data_with_path(15.0) is None
+
+    def test_skips_entries_missing_timestamp(self, handler):
+        now = time.time()
+        handler.recent_rf_data = [
+            {"routing_info": {"path_nodes": ["aa"]}},  # no timestamp -> skipped
+            {"timestamp": now - 0.5, "routing_info": {"path_nodes": ["bb"]}},
+        ]
+        r = handler._find_recent_rf_data_with_path(15.0)
+        assert r is not None and r["routing_info"]["path_nodes"] == ["bb"]
+
+    def test_scope_eligible_only_filters(self, handler):
+        now = time.time()
+        handler.recent_rf_data = [
+            {"timestamp": now - 0.1, "routing_info": {"path_nodes": ["aa"]}, "ok": False},
+            {"timestamp": now - 0.2, "routing_info": {"path_nodes": ["bb"]}, "ok": True},
+        ]
+        with patch.object(
+            handler, "_is_rf_data_scope_eligible", side_effect=lambda d: d.get("ok", False)
+        ):
+            r = handler._find_recent_rf_data_with_path(15.0, scope_eligible_only=True)
+        assert r is not None and r["routing_info"]["path_nodes"] == ["bb"]

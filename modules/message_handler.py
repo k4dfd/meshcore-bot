@@ -1573,6 +1573,15 @@ class MessageHandler:
                 )
 
         if not recent_rf_data:
+            # Channel messages carry no packet prefix, so exact correlation is impossible
+            # and the generic most-recent fallback often returns a pathless packet
+            # (REQ / ADVERT / direct). Prefer the most-recent scope-eligible entry that
+            # actually carries a routing path so the multi-hop path attaches far more often.
+            recent_rf_data = self._find_recent_rf_data_with_path(
+                extended_timeout, scope_eligible_only=scope_eligible_only
+            )
+
+        if not recent_rf_data:
             recent_rf_data = self.find_recent_rf_data(
                 max_age_seconds=extended_timeout,
                 scope_eligible_only=scope_eligible_only,
@@ -1679,6 +1688,34 @@ class MessageHandler:
             return most_recent
 
         return None
+
+    def _find_recent_rf_data_with_path(
+        self, max_age_seconds: float, *, scope_eligible_only: bool = False
+    ) -> dict[str, Any] | None:
+        """Most-recent cached RF entry that actually carries a routing path.
+
+        Channel messages have no packet prefix to exact-match, so the generic most-recent
+        fallback in ``find_recent_rf_data`` often returns a pathless packet (REQ / ADVERT /
+        direct) that arrived just after the message. Preferring the most-recent entry whose
+        ``routing_info`` has ``path_nodes`` attaches the multi-hop path to the message far
+        more reliably. Returns ``None`` when no qualifying entry exists (caller then falls
+        back to the generic most-recent lookup).
+        """
+        import time
+
+        current_time = time.time()
+        best: dict[str, Any] | None = None
+        for data in self.recent_rf_data:
+            ts = data.get("timestamp")
+            if ts is None or (current_time - ts) >= max_age_seconds:
+                continue
+            if scope_eligible_only and not self._is_rf_data_scope_eligible(data):
+                continue
+            if not (data.get("routing_info") or {}).get("path_nodes"):
+                continue
+            if best is None or ts > best["timestamp"]:
+                best = data
+        return best
 
     def store_message_for_correlation(self, message_id: str, message_data: dict[str, Any]) -> None:
         """Store a message temporarily to wait for RF data correlation"""
