@@ -1794,9 +1794,36 @@ class BotDataViewer:
             with open(example_path, encoding='utf-8') as fh:
                 return parse_config_schema(fh.read(), self.config)
 
+        def _config_editor_guard(as_json: bool):
+            """Fail-closed gate for the data-driven config editor. The editor can set
+            ANY setting (including secrets / channel PSKs), so it must never be reachable
+            without authentication. require_auth only enforces a session when
+            web_viewer_password is set; if no password is configured the whole viewer is
+            open, so refuse the config editor entirely rather than expose unauthenticated
+            config writes to anyone who can reach the port (e.g. host = 0.0.0.0)."""
+            if self.web_viewer_password:
+                return None  # require_auth enforces the authenticated session
+            self.logger.warning(
+                "Config editor blocked: web_viewer_password is not set (fail-closed)."
+            )
+            if as_json:
+                return jsonify({
+                    'success': False,
+                    'error': 'Configuration editor is disabled until web_viewer_password is set.',
+                }), 403
+            return render_template(
+                'error.html', error_code=403,
+                error_title='Configuration editor locked',
+                error_message=('Set web_viewer_password in the [Web_Viewer] config to enable the '
+                               'configuration editor. It is disabled without authentication.'),
+            ), 403
+
         @self.app.route('/config/editor')
         def config_editor():
             """Render the data-driven configuration editor page."""
+            denied = _config_editor_guard(as_json=False)
+            if denied is not None:
+                return denied
             return render_template('config_editor.html')
 
         @self.app.route('/api/config/schema')
@@ -1806,6 +1833,9 @@ class BotDataViewer:
             Secret VALUES are redacted (a placeholder is returned) but the keys are
             still listed and remain settable via /api/config/set.
             """
+            denied = _config_editor_guard(as_json=True)
+            if denied is not None:
+                return denied
             try:
                 sections = _load_config_schema()
             except OSError as exc:
@@ -1836,6 +1866,9 @@ class BotDataViewer:
             type. Persists via a targeted line write (all comments/formatting are
             preserved), updates the in-memory config, and queues a live reload.
             """
+            denied = _config_editor_guard(as_json=True)
+            if denied is not None:
+                return denied
             data = request.get_json(silent=True) or {}
             section = str(data.get('section', '')).strip()
             key = str(data.get('key', '')).strip()
