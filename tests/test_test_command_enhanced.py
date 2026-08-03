@@ -88,6 +88,17 @@ def test_hash_bytes_routed_only():
     assert routed["hash_suffix"] == " | Path Hash: 2-byte"
 
 
+def test_node_temp_reported_in_fahrenheit():
+    """Telemetry temperature is Celsius on the wire; the reply shows US/imperial °F."""
+    cmd = _cmd()
+    cmd._node_temp = 25.0  # 25°C -> 77°F
+    ef = cmd._enhanced_fields(mock_message(content="test", hops=0))
+    assert ef["node_temp"] == "77.0"
+    cmd._node_temp = 0.0  # 0°C -> 32°F
+    ef2 = cmd._enhanced_fields(mock_message(content="test", hops=0))
+    assert ef2["node_temp"] == "32.0"
+
+
 def test_distance_reported_in_miles():
     from unittest.mock import patch
     cmd = _cmd()

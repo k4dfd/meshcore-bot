@@ -102,7 +102,7 @@
                     <div>
                         <div class="small text-muted">Distance</div>
                         <div id="stat-avg-dist" class="text-warning fw-bold" style="font-size: 1.1rem; line-height: 1.2;">0</div>
-                        <div class="small text-muted">Avg km</div>
+                        <div class="small text-muted">Avg mi</div>
                     </div>
                 </div>
             </div>
@@ -915,7 +915,7 @@
             document.getElementById('stat-node-count').textContent = stats.node_count || 0;
             document.getElementById('stat-edge-count').textContent = stats.total_edges || 0;
             document.getElementById('stat-avg-obs').textContent = stats.avg_observations || 0;
-            document.getElementById('stat-avg-dist').textContent = stats.avg_distance ? stats.avg_distance + ' km' : 'N/A';
+            document.getElementById('stat-avg-dist').textContent = stats.avg_distance ? (stats.avg_distance * 0.621371).toFixed(2) + ' mi' : 'N/A';
             
             // Set initial Min Observations filter to floor of average observations
             // Only if no saved filter value exists
@@ -1346,7 +1346,7 @@
             line.bindTooltip(`
                 ${formatPrefixWithBytes(edge.from_prefix)} → ${formatPrefixWithBytes(edge.to_prefix)}<br>
                 Observations: ${edge.observation_count}<br>
-                Distance: ${edge.geographic_distance ? edge.geographic_distance.toFixed(1) + ' km' : 'N/A'}<br>
+                Distance: ${edge.geographic_distance ? (edge.geographic_distance * 0.621371).toFixed(1) + ' mi' : 'N/A'}<br>
                 Last Seen: ${edge.last_seen ? new Date(edge.last_seen).toLocaleString() : 'Never'}
             `);
             
@@ -1372,7 +1372,7 @@
                         </tr>
                         <tr>
                             <td style="padding: 2px 8px 2px 0; color: #888;"><strong>Distance:</strong></td>
-                            <td style="padding: 2px 0;">${edge.geographic_distance ? edge.geographic_distance.toFixed(2) + ' km' : 'N/A'}</td>
+                            <td style="padding: 2px 0;">${edge.geographic_distance ? (edge.geographic_distance * 0.621371).toFixed(2) + ' mi' : 'N/A'}</td>
                         </tr>
                         <tr>
                             <td style="padding: 2px 8px 2px 0; color: #888;"><strong>Avg Hop Position:</strong></td>

@@ -1414,10 +1414,12 @@ class ModernContactsManager {
     
     formatDistance(contact) {
         if (contact.distance !== undefined && contact.distance !== null) {
-            if (contact.distance < 1) {
-                return `${(contact.distance * 1000).toFixed(0)}m`;
+            // contact.distance is kilometers; display in US/imperial (feet under ~0.1 mi).
+            const mi = contact.distance * 0.621371;
+            if (mi < 0.1) {
+                return `${(mi * 5280).toFixed(0)} ft`;
             } else {
-                return `${contact.distance.toFixed(1)}km`;
+                return `${mi.toFixed(1)} mi`;
             }
         } else {
             return '<span class="text-muted">N/A</span>';

@@ -898,7 +898,8 @@ class TestCommand(BaseCommand):
             'path_bytes': self._path_bytes_str(message),
             'path_named': self._path_named(message),
             'node_batt': f"{batt:.2f}" if batt is not None else '—',
-            'node_temp': f"{temp:.1f}" if temp is not None else '—',
+            # Telemetry temperature is Celsius (CayenneLPP); display in Fahrenheit (US/imperial).
+            'node_temp': f"{temp * 9 / 5 + 32:.1f}" if temp is not None else '—',
             'batt_suffix': f" | batt {batt:.2f}V" if batt is not None else "",
         }
 
@@ -1006,7 +1007,7 @@ class TestCommand(BaseCommand):
         line4 = f"Tune: {hint}" if hint else ""
         node = ""
         if self._node_batt is not None or self._node_temp is not None:
-            node = f"Node: batt {ef.get('node_batt')}V · {ef.get('node_temp')}°C"
+            node = f"Node: batt {ef.get('node_batt')}V · {ef.get('node_temp')}°F"
         return [self._clip_to_budget(ln, budget)
                 for ln in (greeting, line1, line2, line3, line4, node) if ln]
 
