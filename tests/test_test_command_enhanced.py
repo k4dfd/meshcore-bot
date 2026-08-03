@@ -84,8 +84,8 @@ def test_hash_bytes_routed_only():
     routed = cmd._enhanced_fields(mock_message(
         content="test", hops=3,
         routing_info={"route_type": "FLOOD", "bytes_per_hop": 2, "payload_length": 80}))
-    assert routed["hash_bytes"] == "2B hash"
-    assert routed["hash_suffix"] == " | 2B hash"
+    assert routed["hash_bytes"] == "Path Hash: 2-byte"
+    assert routed["hash_suffix"] == " | Path Hash: 2-byte"
 
 
 def test_distance_reported_in_miles():
@@ -135,6 +135,33 @@ def test_default_report_is_personalized_and_has_metrics():
     assert "SNR 8.5" in joined and "RSSI -92" in joined
     assert "📶" in joined
     assert "link" in joined
+
+
+def test_split_reply_tags_results_message_with_node():
+    """When the reply splits, the results message (separate from the greeting) must
+    lead with @[node] so it is never nameless even if the greeting is lost."""
+    from unittest.mock import patch
+    cmd = _cmd()
+    msg = mock_message(content="test", sender_id="YOURNODE", snr=8.5, rssi=-92, hops=2)
+    cmd._current_message = msg
+    with patch.object(cmd, "get_max_message_length", return_value=40):  # force a split
+        chunks = cmd._build_default_report(msg)
+    assert len(chunks) >= 2
+    assert chunks[0].startswith("Hi YOURNODE, here's your test results")
+    assert chunks[1].startswith("@[YOURNODE]")
+
+
+def test_combined_reply_not_double_tagged():
+    """A single-message reply is personalized by the greeting alone — no redundant tag."""
+    from unittest.mock import patch
+    cmd = _cmd()
+    msg = mock_message(content="test", sender_id="YOURNODE", snr=8.5, rssi=-92, hops=0)
+    cmd._current_message = msg
+    with patch.object(cmd, "get_max_message_length", return_value=500):  # fits one message
+        chunks = cmd._build_default_report(msg)
+    assert len(chunks) == 1
+    assert chunks[0].startswith("Hi YOURNODE, here's your test results")
+    assert "@[YOURNODE]" not in chunks[0]
 
 
 def test_full_request_detection():

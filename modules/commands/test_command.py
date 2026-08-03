@@ -872,8 +872,8 @@ class TestCommand(BaseCommand):
         # direct (0-hop) packet has no path hashes.
         bph = routing.get('bytes_per_hop')
         if bph and hops and hops > 0:
-            hash_bytes = f"{int(bph)}B hash"
-            hash_suffix = f" | {int(bph)}B hash"
+            hash_bytes = f"Path Hash: {int(bph)}-byte"
+            hash_suffix = f" | Path Hash: {int(bph)}-byte"
         else:
             hash_bytes = ""
             hash_suffix = ""
@@ -928,7 +928,8 @@ class TestCommand(BaseCommand):
         """Personalized, auto-chunked default report:
         "Hi <node>, here's your test results:" + the metrics line (split if long)."""
         fields = self._assemble_fields(message)
-        sender = fields.get('sender') or 'there'
+        raw_sender = fields.get('sender')
+        sender = raw_sender or 'there'
         greeting = f"Hi {sender}, here's your test results:"
         metrics = format_piped_template(
             self.get_response_format(),
@@ -943,8 +944,12 @@ class TestCommand(BaseCommand):
             budget = 150
         combined = f"{greeting} {metrics}"
         if budget and len(combined.encode('utf-8')) <= budget:
-            return [combined]  # fits one message — no need to split
-        return [greeting] + self._split_to_budget(metrics, budget)
+            return [combined]  # fits one message — greeting already personalizes it
+        # Split reply: the results ride in a separate message from the greeting, so lead
+        # them with the node tag — that message is never nameless even if the greeting
+        # transmission is lost. Skipped when the sender name could not be resolved.
+        metrics_out = f"@[{raw_sender}] | {metrics}" if raw_sender else metrics
+        return [greeting] + self._split_to_budget(metrics_out, budget)
 
     def _clip_to_budget(self, text: str, budget: int) -> str:
         """UTF-8 byte-aware truncation to `budget` bytes (…-terminated) so a chunk
