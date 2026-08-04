@@ -369,6 +369,28 @@ enabled = true
   companion's `RX_LOG_DATA` (`0x88`) events (a persistent raw-packet subscriber in the
   companion runner keeps them flowing after a client connects).
 
+## Customizing the bot's greetings & random phrases
+The chatty "{opening} {descriptor}! I'm <bot_name>." reply (e.g. "Hola friend! I'm
+SWVAMESH-BOT.") is the **hello command** (`modules/commands/hello_command.py`),
+triggered by GREETING KEYWORDS — hello, hi, hey, howdy, hola, bonjour, aloha,
+konnichiwa, and more (see `hello_command.py` `keywords`). It is NOT the `test`
+command and NOT the greeter, so a message containing a greeting word is what gets
+this reply.
+- Where the wording lives: `translations/en.json` → the `commands.hello` section:
+  `greeting_openings` (Hello / Hola / Howdy / …), `human_descriptors` (friendly
+  terms for the person — kept warm and polite: friend, fellow traveler, neighbor,
+  earthling, …), `response_format` ("I'm {bot_name}."), plus
+  `morning/afternoon/evening_greetings` and `emoji_responses`. Each language has its
+  own file (`es.json`, `fr.json`, …). There are hardcoded FALLBACK copies of these
+  lists in `hello_command.py` that are used ONLY if a translation key is missing.
+- To change the wording: edit `translations/en.json` `commands.hello.*`, then
+  restart the bot. (Translation files are not exposed in the web Config Editor —
+  edit the JSON directly.)
+- To turn the hello greeting OFF entirely: set `[Hello_Command] enabled = false`
+  (works in the Config Editor; applies on reload).
+- Separate mechanism: the NEW-USER onboarding greeting is the greeter, config
+  `[Greeter_Command] greeting_message` (default "Welcome to the mesh, @[{sender}]!").
+
 ---
 
 # PART 3 — MeshConnect / mcdash (the dashboard)

@@ -73,33 +73,16 @@ class HelloCommand(BaseCommand):
             "Erev tov"
         ]
 
-        # Randomized human descriptors
+        # Randomized human descriptors — kept warm and polite (see translations/
+        # en.json commands.hello.human_descriptors, which overrides this fallback).
         self.human_descriptors_fallback = [
-            # Classic robot references
-            "human", "carbon-based lifeform", "organic entity", "biological unit",
-            "flesh creature", "meat-based organism", "carbon unit", "organic being",
-            "biological entity", "meat-based lifeform", "carbon creature", "flesh unit",
-            "organic organism", "biological creature", "meat mech", "flesh bot", "organic automaton",
-            "biological android", "carbon construct", "flesh drone", "organic robot",
-            "biological machine", "meat cyborg", "flesh android", "organic droid", "biological bot",
-            "carbon android", "meat unit", "flesh construct", "organic mech", "biological droid",
-            "meat-based bot", "flesh-based unit", "organic-based entity", "biological-based organism",
-            "carbon-based unit", "meat-based entity", "flesh-based creature", "organic-based unit",
-
-            # Scientific/technical
-            "DNA-based lifeform", "neural network user", "bipedal mammal",
-            "water-based organism", "protein assembler", "ATP consumer",
-            "cellular automaton", "genetic algorithm", "biochemical processor",
-            "metabolic engine",
-
-            # Friendly and approachable
-            "human friend", "fellow sentient being", "earthling", "fellow traveler",
-            "kindred spirit", "digital companion", "friend", "buddy", "pal", "mate",
-            "fellow human", "earth dweller", "terrestrial being", "planet walker",
-
-            # Playful and humorous
-            "humanoid", "organic", "biological", "carbon-based buddy",
-            "flesh-based friend", "organic pal", "biological buddy", "carbon companion"
+            "friend", "human friend", "fellow human", "neighbor", "mesh neighbor",
+            "fellow operator", "fellow traveler", "fellow explorer", "kindred spirit",
+            "mesh friend", "radio friend", "fellow mesh enthusiast", "buddy", "pal",
+            "mate", "earthling", "fellow earthling", "earth dweller", "wonderful human",
+            "fine human", "good human", "curious human", "esteemed operator",
+            "fellow adventurer", "digital companion", "fellow sentient being",
+            "intrepid explorer", "friendly face", "fellow node", "good neighbor"
         ]
 
         # Emoji greeting responses
