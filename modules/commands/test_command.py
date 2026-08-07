@@ -173,14 +173,16 @@ class TestCommand(BaseCommand):
     # Metrics only — the personalized greeting ("Hi <node>, here's your test
     # results:") is prepended in _build_default_report, so this no longer carries
     # the sender/ack prefix.
-    # Compact one-line default: the TRUE green signal meter (not the 📶 emoji), and
-    # trimmed to fit a single mesh message (~145-byte budget) so a `test` is just the
-    # greeting + one clean line — the hash / battery / named-path detail lives in
-    # `test full`.
+    # Compact metrics body for the default `test`. Channel (GRP_TXT) messages are
+    # UNVERIFIED — no ACK, no retransmit (see knowledge/meshcore-channel-msg-
+    # reliability) — so the whole answer must ride in ONE broadcast or the second
+    # packet is silently lost to mesh collisions. This body + a personalized
+    # greeting + the `test full` nudge is assembled into a single ~130-byte packet
+    # in _build_default_report; the hash / battery / margin / named-path detail
+    # lives in `test full`. ' · ' separators (empty fields are dropped, not shown).
     DEFAULT_FORMAT = (
-        "{hops_label} | SNR {snr}dB RSSI {rssi}dBm {signal_meter} "
-        "| {link_quality} link ({link_margin}dB) | reached {bot_city} {reach_distance} "
-        "| {timestamp}"
+        "{hops_label} · SNR {snr}dB RSSI {rssi}dBm {signal_meter} "
+        "· {link_quality} · {reach_distance}"
     )
 
     def get_response_format(self) -> Optional[str]:
@@ -936,14 +938,23 @@ class TestCommand(BaseCommand):
         return parts
 
     def _build_default_report(self, message: MeshMessage) -> list[str]:
-        """Personalized, auto-chunked default report:
-        "Hi <node>, here's your test results:" + the metrics line (split if long)."""
+        """Compact, SINGLE-PACKET default report.
+
+        Channel (GRP_TXT) messages are UNVERIFIED — no ACK, no retransmit — so a
+        two-message reply loses its second packet to mesh collisions with zero
+        recovery (see knowledge/meshcore-channel-msg-reliability-2026-08). We
+        therefore pack the whole `test` answer into ONE broadcast: a personalized
+        greeting + the compact metrics line + a pointer to `test full` for the
+        repeater path and tuning detail. If it would exceed the firmware text
+        budget we shed the nudge, then clip — but we NEVER split into a second
+        unacked packet.
+        """
         fields = self._assemble_fields(message)
         raw_sender = fields.get('sender')
-        sender = raw_sender or 'there'
-        # Always-on, mesh-cheap pointer to the detailed follow-up. It rides the
-        # greeting line (which has room) so the metrics line stays one clean message.
-        greeting = f"Hi {sender}, here's your test results — send 'test full' for the repeater path + tuning:"
+        # _assemble_fields substitutes the translated "unknown sender" token when
+        # sender_id is missing, so guard against @[<that token>] and greet plainly.
+        unknown = self.translate('common.unknown_sender')
+        tag = f"@[{raw_sender}]" if raw_sender and raw_sender != unknown else 'there'
         metrics = format_piped_template(
             self.get_response_format(),
             fields,
@@ -951,18 +962,23 @@ class TestCommand(BaseCommand):
             logger=self.logger,
             prefix_hex_chars=getattr(self.bot, 'prefix_hex_chars', 2),
         )
+        # Drop segments left empty by an unset field (e.g. no reach distance) so
+        # the line never shows a dangling " · · ".
+        metrics = " · ".join(s for s in (seg.strip() for seg in metrics.split(" · ")) if s)
         try:
             budget = int(self.get_max_message_length(message))
         except Exception:
-            budget = 150
-        combined = f"{greeting} {metrics}"
-        if budget and len(combined.encode('utf-8')) <= budget:
-            return [combined]  # fits one message — greeting already personalizes it
-        # Split reply: the results ride in a separate message from the greeting, so lead
-        # them with the node tag — that message is never nameless even if the greeting
-        # transmission is lost. Skipped when the sender name could not be resolved.
-        metrics_out = f"@[{raw_sender}] | {metrics}" if raw_sender else metrics
-        return [greeting] + self._split_to_budget(metrics_out, budget)
+            budget = 130
+        nudge = " · 'test full' for path+tuning"
+        full = f"Hi {tag}: {metrics}{nudge}"
+        if not budget or len(full.encode('utf-8')) <= budget:
+            return [full]
+        # Over budget (only a very long node name): shed the nudge before we would
+        # ever split into a fragile second broadcast; clip as the last resort.
+        lean = f"Hi {tag}: {metrics}"
+        if len(lean.encode('utf-8')) <= budget:
+            return [lean]
+        return [self._clip_to_budget(lean, budget)]
 
     def _clip_to_budget(self, text: str, budget: int) -> str:
         """UTF-8 byte-aware truncation to `budget` bytes (…-terminated) so a chunk

@@ -135,44 +135,52 @@ def test_missing_rssi_is_honest_dash():
     assert ef["link_quality"] == "Unknown"
 
 
-def test_default_report_is_personalized_and_has_metrics():
+def test_default_report_is_single_packet_and_has_metrics():
+    """Channel messages are unverified (no retransmit), so the default `test`
+    reply must be ONE packet — a personalized greeting + the compact metrics +
+    the `test full` nudge — never a second broadcast that could be lost."""
     cmd = _cmd()
     msg = mock_message(content="test", sender_id="YOURNODE", snr=8.5, rssi=-92, hops=2)
     cmd._current_message = msg
     chunks = cmd._build_default_report(msg)
-    joined = " ".join(chunks)
-    assert chunks[0].startswith("Hi YOURNODE, here's your test results")
-    assert "Fairlawn, VA" in joined
-    assert "SNR 8.5" in joined and "RSSI -92" in joined
-    assert "🟩" in joined or "⬜" in joined  # the TRUE signal meter, not the 📶 emoji
-    assert "link" in joined
+    assert len(chunks) == 1                       # single broadcast, no fragile 2nd packet
+    line = chunks[0]
+    assert line.startswith("Hi @[YOURNODE]:")     # personalized, addressed to the requester
+    assert "SNR 8.5" in line and "RSSI -92" in line
+    assert "🟩" in line or "⬜" in line             # the TRUE signal meter, not the 📶 emoji
+    assert "Excellent" in line                    # link-quality verdict word
+    assert "test full" in line                    # always-on pointer to the detail follow-up
 
 
-def test_split_reply_tags_results_message_with_node():
-    """When the reply splits, the results message (separate from the greeting) must
-    lead with @[node] so it is never nameless even if the greeting is lost."""
+def test_default_report_never_splits_into_second_packet():
+    """Even under a pathologically tight budget the default reply stays ONE packet
+    (nudge shed, then clipped) — it must never emit a second unacked broadcast."""
     from unittest.mock import patch
     cmd = _cmd()
     msg = mock_message(content="test", sender_id="YOURNODE", snr=8.5, rssi=-92, hops=2)
     cmd._current_message = msg
-    with patch.object(cmd, "get_max_message_length", return_value=40):  # force a split
-        chunks = cmd._build_default_report(msg)
-    assert len(chunks) >= 2
-    assert chunks[0].startswith("Hi YOURNODE, here's your test results")
-    assert chunks[1].startswith("@[YOURNODE]")
+    for budget in (130, 60, 40):
+        with patch.object(cmd, "get_max_message_length", return_value=budget):
+            chunks = cmd._build_default_report(msg)
+        assert len(chunks) == 1, f"budget {budget} split into {len(chunks)} packets"
+        assert len(chunks[0].encode("utf-8")) <= budget
 
 
-def test_combined_reply_not_double_tagged():
-    """A single-message reply is personalized by the greeting alone — no redundant tag."""
+def test_default_report_sheds_nudge_before_clipping():
+    """When the greeting+metrics+nudge is just over budget, the nudge is dropped
+    first so the metrics survive intact (rather than clipping the numbers)."""
     from unittest.mock import patch
     cmd = _cmd()
-    msg = mock_message(content="test", sender_id="YOURNODE", snr=8.5, rssi=-92, hops=0)
+    msg = mock_message(content="test", sender_id="YOURNODE", snr=8.5, rssi=-92, hops=2)
     cmd._current_message = msg
-    with patch.object(cmd, "get_max_message_length", return_value=500):  # fits one message
+    with patch.object(cmd, "get_max_message_length", return_value=500):
+        full = cmd._build_default_report(msg)[0]
+    lean_budget = len(full.encode("utf-8")) - 5   # just under the full-with-nudge length
+    with patch.object(cmd, "get_max_message_length", return_value=lean_budget):
         chunks = cmd._build_default_report(msg)
     assert len(chunks) == 1
-    assert chunks[0].startswith("Hi YOURNODE, here's your test results")
-    assert "@[YOURNODE]" not in chunks[0]
+    assert "test full" not in chunks[0]           # nudge shed
+    assert "SNR 8.5" in chunks[0] and "RSSI -92" in chunks[0]  # metrics intact, not clipped
 
 
 def test_full_request_detection():

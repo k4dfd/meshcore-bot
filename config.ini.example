@@ -1395,9 +1395,16 @@ require_path_bytes_failure_response =
 # Optional: full ack template for test/t. When set, overrides [Keywords] test for this command only.
 # Core placeholders: sender, phrase, phrase_part, connection_info, path, hops, hops_label,
 #   timestamp, elapsed, snr, path_distance, firstlast_distance.
-# NOTE: the default test reply is now personalized — the command prepends
-# "Hi <node>, here's your test results:" and splits into multiple messages when
-# needed, so this template is the METRICS body only (no sender/ack prefix).
+# NOTE: the default test reply is a SINGLE mesh packet. Channel (GRP_TXT) messages
+# are unverified — no ACK, no retransmit — so a two-message reply loses its second
+# packet to mesh collisions with no recovery. The command therefore wraps this
+# METRICS body (no sender/ack prefix) as one packet:
+#   "Hi @[<node>]: <metrics> · 'test full' for path+tuning"
+# and, if a very long node name pushes it over the ~146-byte firmware text limit,
+# it sheds the nudge and then clips — but never emits a second broadcast. Keep this
+# body compact (the built-in default omits the timestamp for headroom); the hash /
+# battery / margin / named-path detail lives in 'test full'. ' · ' separators are
+# used and empty fields are dropped (no dangling " · · ").
 # Enhanced link-report placeholders (added by the node-performance report):
 #   rssi (dBm or "—"), signal_icon (compact green 📶 from RSSI, empty if unknown),
 #   signal_meter (green level meter 🟩🟩🟩⬜ for the full report), bot_name,
