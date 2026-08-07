@@ -90,16 +90,36 @@ def assess_link(
 
 
 def _tuning_hint(verdict: str, limiting: Optional[str], base_margin: float, hops: int) -> str:
-    """One short, actionable sentence. Keyed to the limiting factor + headroom."""
-    if verdict in ("Marginal", "Weak"):
-        if hops <= 0:
-            return "weak & direct: raise antenna height or improve line-of-sight"
-        return "weak link: reposition antenna, add height, or route via a closer repeater"
-    if verdict == "Fair":
-        return "usable but little margin: a small antenna/height gain would harden it"
-    # Good / Excellent — plenty of headroom
-    if hops <= 1 and base_margin >= _EXCELLENT:
-        return "strong & near-direct: you could lower TX power to save airtime"
-    if hops > 3:
-        return "solid signal but many hops: a closer repeater would cut latency"
-    return "healthy link with good margin"
+    """One short, actionable sentence keyed to the ACTUAL limiting factor.
+
+    The two ways a link runs out of budget need opposite fixes, so we name the
+    likely real issue rather than just the tier:
+      - RSSI-limited -> range/obstruction problem (signal too weak): more antenna,
+        line-of-sight, or a closer repeater.
+      - SNR-limited  -> noise/interference problem (signal present but noisy): a
+        quieter channel/time, or the antenna away from local noise.
+    """
+    if verdict == "Unknown":
+        return ""
+
+    if verdict in ("Marginal", "Weak", "Fair"):
+        if limiting == "snr":
+            core = ("SNR is near the demod floor — this is noise/interference-limited: "
+                    "try a quieter channel or time of day, and move the antenna away from "
+                    "local noise (computers, chargers, USB) or up higher")
+        else:  # "rssi" (or a single-metric assessment) -> range/path limited
+            core = ("signal strength is the limit — this is range/obstruction-limited: "
+                    "raise the antenna, improve line-of-sight, or route through a closer "
+                    "repeater")
+        lead = "usable but little headroom — " if verdict == "Fair" else "weak link — "
+        tail = f" (the {hops}-hop path adds loss too)" if hops and hops > 3 else ""
+        return lead + core + tail
+
+    # Good / Excellent — plenty of headroom.
+    if (hops or 0) <= 1 and base_margin >= _EXCELLENT:
+        return ("strong, near-direct link with headroom to spare — you could lower TX "
+                "power to save airtime and battery")
+    if (hops or 0) > 3:
+        return ("healthy signal but a long path — a closer repeater would cut latency "
+                "and add resilience")
+    return "healthy link with comfortable margin — no changes needed"

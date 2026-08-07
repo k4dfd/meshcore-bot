@@ -1407,7 +1407,11 @@ require_path_bytes_failure_response =
 #   sentence), link_margin (dB), route_type (direct/flood/routed), hash_bytes
 #   ("Path Hash: 2-byte", routed only), hash_suffix (" | Path Hash: 2-byte" or empty), airtime ("452ms"),
 #   path_bytes ("6B path"), path_named ("NODE (City) > NODE (City)"), node_batt (V or
-#   "—"), node_temp (°F or "—"), batt_suffix (" | batt 4.15V" or empty).
+#   "—"), node_temp (°F or "—"), batt_suffix (" | batt 4.15V" or empty),
+#   tune_nudge (" · reply 'test full' for tuning tips" only on Fair/Weak/Marginal
+#   links, else empty — a mesh-friendly, opt-in pointer to the detailed report).
+# The detailed 'test full' report resolves each hop to the repeater NAME (City, ST)
+# — not just a hash — and gives diagnostic tuning advice (noise- vs range-limited).
 # Pipe filters (feed-style), e.g. only show cumulative path distance when hops are multibyte (2+ bytes per hop):
 # response_format = ack @[{sender}]{phrase_part} | {connection_info}{path_distance|pathbytes_min:2|prefix_if_nonempty: | Path Dist: }| F/L Dist: {firstlast_distance} | {elapsed} | Rec: {timestamp}
 # Filters: pathbytes_min:N (alias pathbytes:N) clears the field unless bytes_per_hop >= N; prefix_if_nonempty:L prepends literal L when value non-empty after prior filters. If L contains |, put prefix_if_nonempty last in that placeholder (it consumes the rest of the chain as its literal).

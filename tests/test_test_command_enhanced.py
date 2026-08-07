@@ -258,3 +258,13 @@ def test_full_report_lines_within_budget_even_with_long_path(monkeypatch):
     lines = cmd._build_full_report(msg, cmd._assemble_fields(msg))
     for ln in lines:
         assert len(ln.encode("utf-8")) <= budget, f"line over budget: {ln!r}"
+
+
+def test_tune_nudge_only_on_weak_links():
+    """The 'reply test full' nudge appears only when the link is weak enough that the
+    tuning advice would help — strong links stay clean (mesh-friendly)."""
+    cmd = _cmd()
+    weak = cmd._enhanced_fields(mock_message(content="test", snr=-6.0, rssi=-120, hops=0))
+    assert "test full" in weak["tune_nudge"]
+    strong = cmd._enhanced_fields(mock_message(content="test", snr=12.0, rssi=-40, hops=0))
+    assert strong["tune_nudge"] == ""

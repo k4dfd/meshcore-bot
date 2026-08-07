@@ -52,3 +52,30 @@ def test_limiting_factor_is_the_smaller_margin():
 def test_floor_constants_are_sf7_values():
     assert DEFAULT_SNR_FLOOR_DB == -7.5
     assert DEFAULT_RSSI_FLOOR_DBM == -127.0
+
+
+def test_snr_limited_weak_gives_noise_interference_advice():
+    # SNR near the floor, RSSI strong -> SNR-limited -> noise/interference advice.
+    a = assess_link(snr=-6.0, rssi=-70, hops=0)
+    assert a.limiting == "snr"
+    assert a.verdict in ("Weak", "Marginal", "Fair")
+    assert "noise" in a.hint or "interference" in a.hint
+
+
+def test_rssi_limited_weak_gives_range_advice():
+    # RSSI near the floor, SNR strong -> RSSI-limited -> range/obstruction advice.
+    a = assess_link(snr=10.0, rssi=-125, hops=0)
+    assert a.limiting == "rssi"
+    assert a.verdict in ("Weak", "Marginal", "Fair")
+    assert "range" in a.hint or "line-of-sight" in a.hint
+
+
+def test_fair_link_hint_notes_thin_headroom():
+    a = assess_link(snr=-3.0, rssi=-70, hops=0)  # snr margin 4.5 -> Fair, snr-limited
+    assert a.verdict == "Fair"
+    assert "little headroom" in a.hint
+
+
+def test_long_path_weak_mentions_hops():
+    a = assess_link(snr=-6.0, rssi=-70, hops=6)  # snr-limited + long path
+    assert "hop" in a.hint  # notes the multi-hop loss

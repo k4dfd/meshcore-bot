@@ -175,7 +175,8 @@ class TestCommand(BaseCommand):
     # the sender/ack prefix.
     DEFAULT_FORMAT = (
         "{hops_label} | SNR {snr}dB RSSI {rssi}dBm {signal_icon} "
-        "| {reached}{reach_suffix} | {link_quality} link{hash_suffix}{batt_suffix} | {timestamp}"
+        "| {reached}{reach_suffix} | {link_quality} link (margin {link_margin}dB)"
+        "{hash_suffix}{batt_suffix} | {timestamp}{tune_nudge}"
     )
 
     def get_response_format(self) -> Optional[str]:
@@ -890,6 +891,11 @@ class TestCommand(BaseCommand):
             'reach_suffix': f" ({reach} from your node)" if reach else "",
             'link_quality': link.verdict,
             'quality_hint': link.hint,
+            # Opt-in nudge: only surface "reply 'test full'" when the link is weak
+            # enough that the diagnostic advice would actually help — keeps strong
+            # links clean and the mesh quiet.
+            'tune_nudge': (" · reply 'test full' for tuning tips"
+                           if link.verdict in ("Fair", "Weak", "Marginal") else ""),
             'link_margin': f"{margin}" if margin is not None else '—',
             'route_type': route_type,
             'hash_bytes': hash_bytes,
