@@ -144,7 +144,7 @@ def test_default_report_is_personalized_and_has_metrics():
     assert chunks[0].startswith("Hi YOURNODE, here's your test results")
     assert "Fairlawn, VA" in joined
     assert "SNR 8.5" in joined and "RSSI -92" in joined
-    assert "📶" in joined
+    assert "🟩" in joined or "⬜" in joined  # the TRUE signal meter, not the 📶 emoji
     assert "link" in joined
 
 

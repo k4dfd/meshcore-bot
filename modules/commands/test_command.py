@@ -173,10 +173,14 @@ class TestCommand(BaseCommand):
     # Metrics only — the personalized greeting ("Hi <node>, here's your test
     # results:") is prepended in _build_default_report, so this no longer carries
     # the sender/ack prefix.
+    # Compact one-line default: the TRUE green signal meter (not the 📶 emoji), and
+    # trimmed to fit a single mesh message (~145-byte budget) so a `test` is just the
+    # greeting + one clean line — the hash / battery / named-path detail lives in
+    # `test full`.
     DEFAULT_FORMAT = (
-        "{hops_label} | SNR {snr}dB RSSI {rssi}dBm {signal_icon} "
-        "| {reached}{reach_suffix} | {link_quality} link (margin {link_margin}dB)"
-        "{hash_suffix}{batt_suffix} | {timestamp}{tune_nudge}"
+        "{hops_label} | SNR {snr}dB RSSI {rssi}dBm {signal_meter} "
+        "| {link_quality} link ({link_margin}dB) | reached {bot_city} {reach_distance} "
+        "| {timestamp}{tune_nudge}"
     )
 
     def get_response_format(self) -> Optional[str]:
