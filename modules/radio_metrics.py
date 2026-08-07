@@ -55,9 +55,9 @@ def signal_meter(rssi: Optional[float]) -> str:
 def airtime_ms(
     payload_len: int,
     *,
-    sf: int = 7,
-    bw_hz: int = 62500,
-    coding_rate: int = 4,   # 1..4 → 4/5..4/8 (our mesh uses 4/8 = 4)
+    sf: int = 10,
+    bw_hz: int = 250000,
+    coding_rate: int = 1,   # 1..4 → 4/5..4/8 (MeshCore default preset uses 4/5 = 1)
     preamble: int = 16,
     explicit_header: bool = True,
     crc: bool = True,
@@ -65,7 +65,9 @@ def airtime_ms(
 ) -> Optional[float]:
     """LoRa time-on-air in milliseconds (Semtech formula). None on bad input.
 
-    Defaults match our RF preset (SF7 / BW 62.5 kHz / CR 4/8 / preamble 16).
+    Defaults match the MeshCore default preset (SF10 / BW 250 kHz / CR 4/5 /
+    preamble 16 — firmware preambleLengthForSF() = 16 for SF>8). The `test`
+    command passes the connected radio's live sf/bw/cr when available.
     """
     try:
         pl = int(payload_len)

@@ -1441,11 +1441,13 @@ telemetry_in_test = true
 telemetry_timeout_seconds = 2.0
 # 'test full' / 'test detail' sends a multi-line report (named path, quality, tuning).
 full_report_enabled = true
-# Link-quality floors for the verdict + margin. Defaults match our SF7 / BW 62.5 kHz
-# preset (SF7 demod floor -7.5 dB; SF7/BW62.5 sensitivity ~-127 dBm). Adjust for a
-# different radio preset.
-snr_floor_db = -7.5
-rssi_floor_dbm = -127.0
+# Link-quality floors for the verdict + margin. Defaults match the MeshCore default
+# preset SF10 / BW 250 kHz (SF10 demod floor -15 dB, matching the firmware's own SNR
+# table; SF10/BW250 sensitivity ~-129 dBm = SX1262 -132 dBm @BW125 + 3 dB for the
+# bandwidth doubling). Adjust ONLY if your radio runs a different preset — e.g. the
+# old SF7/BW62.5 values were -7.5 and -127.0.
+snr_floor_db = -15.0
+rssi_floor_dbm = -129.0
 
 [Trace_Command]
 # Enable or disable the trace/tracer commands (link diagnostics)

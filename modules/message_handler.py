@@ -3559,9 +3559,14 @@ class MessageHandler:
         if message.hops is not None:
             try:
                 if int(message.hops) > max_response_hops:
-                    self.logger.debug(
+                    # Log at INFO (not debug) so an operator can see WHY a distant
+                    # node got no reply — otherwise the drop is silent at INFO level
+                    # and looks like the bot broke. Raise [Channels] max_response_hops
+                    # to answer farther nodes (at the cost of mesh airtime).
+                    self.logger.info(
                         f"Ignoring message from {message.sender_id}: "
-                        f"{message.hops} hops > max_response_hops ({max_response_hops})"
+                        f"{message.hops} hops > max_response_hops ({max_response_hops}) — "
+                        f"raise [Channels] max_response_hops to reply to distant nodes"
                     )
                     return False
             except (TypeError, ValueError):

@@ -5,10 +5,13 @@ Turns raw SNR / RSSI / hop-count into a plain-language verdict plus one short
 tuning hint, so a user testing their node learns not just the numbers but what to
 DO with them. Pure functions, no I/O — unit-tested at the bucket boundaries.
 
-Model (our RF preset: SF7 / BW 62.5 kHz):
-  - LoRa SF7 demodulator SNR floor ~= -7.5 dB (well-established per-SF LoRa limit).
-  - SX1262 SF7 / BW 62.5 kHz sensitivity ~= -127 dBm (datasheet, approximate;
-    both floors are overridable so a different preset can be tuned in config).
+Model (our RF preset: SF10 / BW 250 kHz — the MeshCore default preset):
+  - LoRa SF10 demodulator SNR floor = -15 dB (Semtech per-SF LoRa limit table,
+    -2.5 dB per SF step from SF7 -7.5). MeshCore firmware hardcodes this exact
+    value in its own SNR-threshold table (RadioLibWrappers.cpp:194-202).
+  - SX1262 SF10 / BW 250 kHz sensitivity ~= -129 dBm (datasheet -132 dBm at
+    BW125, +3 dB for the 125->250 kHz bandwidth doubling). Approximate; both
+    floors are overridable in config so a different preset can be tuned in.
   - The limiting margin = min(snr_margin, rssi_margin). Verdict buckets on that,
     then a small penalty for long paths (each hop is a dropout opportunity).
 """
@@ -16,8 +19,8 @@ from __future__ import annotations
 
 from typing import NamedTuple, Optional
 
-DEFAULT_SNR_FLOOR_DB = -7.5      # SF7 demod floor
-DEFAULT_RSSI_FLOOR_DBM = -127.0  # SF7/BW62.5 sensitivity (approx)
+DEFAULT_SNR_FLOOR_DB = -15.0     # SF10 demod floor (matches MeshCore firmware table)
+DEFAULT_RSSI_FLOOR_DBM = -129.0  # SF10/BW250 sensitivity (SX1262 -132dBm@BW125 +3dB)
 
 # Verdict thresholds on the limiting margin (dB), after hop penalty.
 _EXCELLENT = 15.0

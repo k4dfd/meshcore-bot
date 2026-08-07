@@ -272,7 +272,20 @@ def test_tune_nudge_only_on_weak_links():
     """The 'reply test full' nudge appears only when the link is weak enough that the
     tuning advice would help — strong links stay clean (mesh-friendly)."""
     cmd = _cmd()
-    weak = cmd._enhanced_fields(mock_message(content="test", snr=-6.0, rssi=-120, hops=0))
-    assert "test full" in weak["tune_nudge"]
+    weak = cmd._enhanced_fields(mock_message(content="test", snr=-13.0, rssi=-125, hops=0))
+    assert "test full" in weak["tune_nudge"]  # snr margin 2 (SF10 floor) -> Weak
     strong = cmd._enhanced_fields(mock_message(content="test", snr=12.0, rssi=-40, hops=0))
     assert strong["tune_nudge"] == ""
+
+
+def test_radio_params_maps_live_self_info():
+    """Airtime uses the connected radio's real sf/bw/cr, mapped from self_info."""
+    cmd = _cmd()
+    cmd.bot.meshcore.self_info = {"radio_sf": 10, "radio_bw": 250.0, "radio_cr": 5}
+    assert cmd._radio_params() == {"sf": 10, "bw_hz": 250000, "coding_rate": 1}
+    # A different preset flows through too (SF7 / BW125 / CR 4/8).
+    cmd.bot.meshcore.self_info = {"radio_sf": 7, "radio_bw": 125.0, "radio_cr": 8}
+    assert cmd._radio_params() == {"sf": 7, "bw_hz": 125000, "coding_rate": 4}
+    # No/garbled info -> empty, so format_airtime falls back to SF10/BW250 defaults.
+    cmd.bot.meshcore.self_info = None
+    assert cmd._radio_params() == {}

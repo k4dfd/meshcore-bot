@@ -906,7 +906,7 @@ class TestCommand(BaseCommand):
             'route_type': route_type,
             'hash_bytes': hash_bytes,
             'hash_suffix': hash_suffix,
-            'airtime': format_airtime(routing.get('payload_length')),
+            'airtime': format_airtime(routing.get('payload_length'), **self._radio_params()),
             'path_bytes': self._path_bytes_str(message),
             'path_named': self._path_named(message),
             'node_batt': f"{batt:.2f}" if batt is not None else '—',
@@ -914,6 +914,39 @@ class TestCommand(BaseCommand):
             'node_temp': f"{temp * 9 / 5 + 32:.1f}" if temp is not None else '—',
             'batt_suffix': f" | batt {batt:.2f}V" if batt is not None else "",
         }
+
+    def _radio_params(self) -> dict:
+        """Live LoRa params (sf / bw_hz / coding_rate) from the connected radio so
+        the airtime estimate matches the ACTUAL preset, not a hardcoded default.
+
+        Reads meshcore.self_info (dict or object; same source as the username
+        lookup). radio_bw is in kHz; radio_cr is RadioLib 5..8 = 4/5..4/8 mapped to
+        the airtime helper's 1..4. Returns {} on anything missing/odd, so
+        format_airtime falls back to the MeshCore default preset (SF10/BW250/CR4-5).
+        """
+        info = getattr(getattr(self.bot, 'meshcore', None), 'self_info', None)
+        if not info:
+            return {}
+
+        def _get(key):
+            if isinstance(info, dict):
+                return info.get(key)
+            return getattr(info, key, None)
+
+        params: dict = {}
+        try:
+            sf = _get('radio_sf')
+            if sf is not None and 6 <= int(sf) <= 12:          # valid LoRa SF
+                params['sf'] = int(sf)
+            bw = _get('radio_bw')                               # kHz
+            if bw is not None and 7 <= float(bw) <= 500:        # valid LoRa BW range
+                params['bw_hz'] = int(round(float(bw) * 1000))
+            cr = _get('radio_cr')                               # RadioLib 5..8 = 4/5..4/8
+            if cr is not None and 5 <= int(cr) <= 8:
+                params['coding_rate'] = int(cr) - 4
+        except (TypeError, ValueError, OverflowError):
+            return {}
+        return params
 
     def _split_to_budget(self, text: str, budget: int) -> list[str]:
         """Split text into <=budget-byte chunks, preferring ' | ' boundaries."""
