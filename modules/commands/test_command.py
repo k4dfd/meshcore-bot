@@ -180,7 +180,7 @@ class TestCommand(BaseCommand):
     DEFAULT_FORMAT = (
         "{hops_label} | SNR {snr}dB RSSI {rssi}dBm {signal_meter} "
         "| {link_quality} link ({link_margin}dB) | reached {bot_city} {reach_distance} "
-        "| {timestamp}{tune_nudge}"
+        "| {timestamp}"
     )
 
     def get_response_format(self) -> Optional[str]:
@@ -941,7 +941,9 @@ class TestCommand(BaseCommand):
         fields = self._assemble_fields(message)
         raw_sender = fields.get('sender')
         sender = raw_sender or 'there'
-        greeting = f"Hi {sender}, here's your test results:"
+        # Always-on, mesh-cheap pointer to the detailed follow-up. It rides the
+        # greeting line (which has room) so the metrics line stays one clean message.
+        greeting = f"Hi {sender}, here's your test results — send 'test full' for the repeater path + tuning:"
         metrics = format_piped_template(
             self.get_response_format(),
             fields,
